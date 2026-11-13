@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { analyze, resolveSettings } from '../src/analyze.js';
+import { analyze, parseShifts, resolveSettings } from '../src/analyze.js';
 import { parseCounts, parseStates } from '../src/input.js';
 import { countsExample, statesExample } from './helpers.js';
 
@@ -179,5 +179,91 @@ describe('analyze: --by-day', () => {
     const z = parseStates('timestamp,state\n2026-01-01T00:00:00Z,RUN\n2026-01-02T00:00:00Z,DOWN\n');
     expect(() => analyze(z, undefined, { byDay: true, dayOffset: '8' })).toThrow(/not a zone offset/);
     expect(() => analyze(z, undefined, { byDay: true, to: '2028-01-01T00:00:00Z' })).toThrow(/at most 400 days/);
+  });
+});
+
+describe('analyze: --shifts', () => {
+  const s = states(
+    '2026-01-01 22:00,A,RUN,\n2026-01-01 23:30,A,DOWN,jam\n2026-01-02 00:30,A,RUN,\n2026-01-02 06:00,A,off,\n2026-01-02 07:00,A,RUN,\n2026-01-02 08:00,A,RUN,\n',
+  );
+  const c = counts('2026-01-01 23:00,A,100,100\n2026-01-02 00:00,A,50,49\n2026-01-02 01:00,A,60,60\n2026-01-02 07:00,A,5,5\n2026-01-02 08:00,A,10,10\n');
+
+  it('cuts the window at each shift start; a count on a shift change closes the shift before', () => {
+    const r = analyze(s, c, { idealCycleS: 30, shifts: 'Night=19:00,Day=07:00' });
+    expect(r.shifts?.map((x) => [x.shift, x.start, x.end, x.periods, x.seconds])).toEqual([
+      ['Day', '07:00', '19:00', 1, 3600],
+      ['Night', '19:00', '07:00', 1, 9 * 3600],
+    ]);
+    const [day, night] = r.shifts ?? [];
+    expect(night.total).toMatchObject({ runS: 7 * 3600, downS: 3600, plannedStopS: 3600, stops: 1, totalParts: 215, goodParts: 214 });
+    expect(day.total).toMatchObject({ runS: 3600, downS: 0, stops: 0, totalParts: 10, availabilityPct: 100 });
+    expect(day.total.runS + night.total.runS).toBe(r.total.runS);
+    expect(day.total.totalParts + night.total.totalParts).toBe(r.total.totalParts);
+    expect(r.shiftOffset).toBeNull();
+    expect(r.days).toBeUndefined();
+    expect(r.findings).toEqual([]);
+    expect(analyze(s, c, { idealCycleS: 30 }).shifts).toBeUndefined();
+  });
+
+  it('sums each shift over every day; shifts that never fall in the window are left out', () => {
+    const z = states('2026-01-01 00:00,M,RUN,\n2026-01-02 13:00,M,DOWN,jam\n2026-01-02 15:00,M,RUN,\n2026-01-03 00:00,M,RUN,\n');
+    const r = analyze(z, undefined, { shifts: 'A=06:00,B=14:00,C=22:00' });
+    expect(r.shifts?.map((x) => [x.shift, x.periods, x.seconds, x.total.downS, x.total.stops])).toEqual([
+      ['A', 2, 16 * 3600, 3600, 1],
+      ['B', 2, 16 * 3600, 3600, 1],
+      ['C', 3, 16 * 3600, 0, 0],
+    ]);
+    // The jam from 13:00 to 15:00 crosses the 14:00 change: a stop in both A and B, one stop in the machine total.
+    expect(r.total.stops).toBe(1);
+    const short = analyze(z, undefined, { shifts: 'A=06:00,B=14:00,C=22:00', from: '2026-01-01 07:00', to: '2026-01-01 12:00' });
+    expect(short.shifts?.map((x) => [x.shift, x.periods, x.seconds])).toEqual([['A', 1, 5 * 3600]]);
+  });
+
+  it('a count right on the window start goes to the first shift', () => {
+    const r = analyze(s, c, { idealCycleS: 30, shifts: 'Day=07:00,Night=19:00', from: '2026-01-02 07:00' });
+    expect(r.shifts?.map((x) => [x.shift, x.total.totalParts])).toEqual([['Day', 15]]);
+  });
+
+  it('files with offsets: shift boundaries use the first row offset unless --day-offset is given', () => {
+    const z = parseStates('timestamp,machine,state\n2026-01-01T05:00:00+08:00,A,RUN\n2026-01-01T09:00:00+08:00,A,DOWN\n2026-01-01T11:00:00+08:00,A,RUN\n');
+    const own = analyze(z, undefined, { shifts: 'Day=07:00,Night=19:00' });
+    expect(own.shiftOffset).toBe('+08:00');
+    expect(own.shifts?.map((x) => [x.shift, x.seconds, x.total.runS])).toEqual([
+      ['Day', 4 * 3600, 2 * 3600],
+      ['Night', 2 * 3600, 2 * 3600],
+    ]);
+    // In UTC the window is 21:00 .. 03:00, all inside Night (19:00 .. 07:00).
+    const utc = analyze(z, undefined, { shifts: 'Day=07:00,Night=19:00', dayOffset: 'Z' });
+    expect(utc.shifts?.map((x) => [x.shift, x.seconds])).toEqual([['Night', 6 * 3600]]);
+    expect(utc.shiftOffset).toBe('Z');
+  });
+
+  it('with --by-day too, both tables add up to the window', () => {
+    const r = analyze(s, c, { idealCycleS: 30, byDay: true, shifts: 'Day=07:00,Night=19:00' });
+    const sum = (xs: { total: { runS: number; totalParts: number } }[] | undefined) => (xs ?? []).reduce((t, x) => t + x.total.runS + x.total.totalParts, 0);
+    expect(sum(r.days)).toBe(r.total.runS + r.total.totalParts);
+    expect(sum(r.shifts)).toBe(r.total.runS + r.total.totalParts);
+  });
+
+  it('a single shift covers the whole day', () => {
+    const r = analyze(s, c, { shifts: 'All day=00:00' });
+    expect(r.shifts?.map((x) => [x.shift, x.start, x.end, x.periods, x.seconds])).toEqual([['All day', '00:00', '00:00', 2, 10 * 3600]]);
+  });
+
+  it('bad shift options are input errors', () => {
+    expect(parseShifts(' B = 14:00 , A=6:00')).toEqual([
+      { name: 'A', startMin: 360 },
+      { name: 'B', startMin: 840 },
+    ]);
+    expect(() => parseShifts('07:00')).toThrow(/is not name=HH:MM/);
+    expect(() => parseShifts('=07:00')).toThrow(/is not name=HH:MM/);
+    expect(() => parseShifts('Day=7')).toThrow(/--shifts start of "Day" "7" is not a time of day/);
+    expect(() => parseShifts('Day=07:00,day=19:00')).toThrow(/names shift "day" twice/);
+    expect(() => parseShifts('Day=07:00,Late=7:00')).toThrow(/"Day" and "Late" both start at 07:00/);
+    expect(() => analyze(s, c, { shifts: 'Day=07:00', dayStart: '07:00' })).toThrow(/need --by-day/);
+    expect(() => analyze(s, c, { shifts: 'Day=07:00', dayOffset: '+08:00' })).toThrow(/only for files whose timestamps carry a zone offset/);
+    const z = parseStates('timestamp,state\n2026-01-01T00:00:00Z,RUN\n2026-01-02T00:00:00Z,DOWN\n');
+    expect(() => analyze(z, undefined, { dayOffset: '+08:00' })).toThrow(/need --by-day/);
+    expect(() => analyze(z, undefined, { shifts: 'Day=07:00', to: '2028-01-01T00:00:00Z' })).toThrow(/at most 400 days/);
   });
 });

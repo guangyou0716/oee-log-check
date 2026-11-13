@@ -1,5 +1,5 @@
-export { analyze, resolveSettings } from './analyze.js';
-export type { Finding, MachineStats, ParetoRow, Report, ResolvedSettings, Settings, StateClass } from './analyze.js';
+export { analyze, parseShifts, resolveSettings } from './analyze.js';
+export type { Finding, MachineStats, ParetoRow, Report, ResolvedSettings, Settings, ShiftStats, StateClass } from './analyze.js';
 export { InputError } from './errors.js';
 export { parseCounts, parseStates, SINGLE_MACHINE } from './input.js';
 export type { CountLog, CountOptions, CountRow, StateLog, StateOptions, StateRow } from './input.js';

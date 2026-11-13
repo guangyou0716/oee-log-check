@@ -22,8 +22,10 @@ export interface Settings {
   byDay?: boolean;
   /** Time of day a day starts, HH:MM (default 00:00), e.g. 07:00 when the first shift starts at 7. */
   dayStart?: string;
-  /** Zone offset for day boundaries when the files carry offsets (default: the first state row's offset). */
+  /** Zone offset for day and shift boundaries when the files carry offsets (default: the first state row's offset). */
   dayOffset?: string;
+  /** Shift calendar "name=HH:MM,...": each shift starts at its time every day and lasts until the next one starts. */
+  shifts?: string;
 }
 
 export interface ResolvedSettings {
@@ -67,6 +69,18 @@ export interface DayStats {
   total: TotalStats;
 }
 
+export interface ShiftStats {
+  shift: string;
+  /** Wall-clock start and end (the next shift's start), HH:MM. */
+  start: string;
+  end: string;
+  /** How many times the shift falls in the window (first and last cut to the window). */
+  periods: number;
+  seconds: number;
+  machines: MachineStats[];
+  total: TotalStats;
+}
+
 export interface ParetoRow {
   reason: string;
   stops: number;
@@ -93,6 +107,10 @@ export interface Report {
   days?: DayStats[];
   /** With byDay: day start time and the offset used for day boundaries (null for files without offsets). */
   dayStart?: { time: string; offset: string | null };
+  /** Per shift, summed over every day in the window, only with shifts. No findings of their own. */
+  shifts?: ShiftStats[];
+  /** With shifts: the offset used for shift boundaries (null for files without offsets). */
+  shiftOffset?: string | null;
   pareto: ParetoRow[];
   counts: { given: boolean; rows: number; outsideWindow: number; unknownMachine: number };
   findings: Finding[];
@@ -271,6 +289,52 @@ function offsetMinutes(text: string, flag: string): number {
   return m[1] ? 0 : (m[2] === '-' ? -1 : 1) * (Number(m[3]) * 60 + Number(m[4]));
 }
 
+/** "7:00" -> minutes after midnight. */
+function clockMinutes(text: string, flag: string): number {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(text.trim());
+  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) {
+    throw new InputError(`${flag} "${text}" is not a time of day like 07:00.`);
+  }
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+const clockText = (min: number) => `${pad(Math.floor(min / 60))}:${pad(min % 60)}`;
+
+interface ShiftDef {
+  name: string;
+  startMin: number;
+}
+
+/** "Day=07:00,Night=19:00" -> shifts sorted by start time. */
+export function parseShifts(text: string): ShiftDef[] {
+  const out: ShiftDef[] = [];
+  for (const part of text.split(',')) {
+    const at = part.lastIndexOf('=');
+    const name = at < 0 ? '' : part.slice(0, at).trim();
+    if (name === '') {
+      throw new InputError(`--shifts: "${part.trim()}" is not name=HH:MM (for example Day=07:00,Night=19:00).`);
+    }
+    const startMin = clockMinutes(part.slice(at + 1), `--shifts start of "${name}"`);
+    if (out.some((x) => x.name.toLowerCase() === name.toLowerCase())) {
+      throw new InputError(`--shifts names shift "${name}" twice.`);
+    }
+    const same = out.find((x) => x.startMin === startMin);
+    if (same) {
+      throw new InputError(`--shifts: "${same.name}" and "${name}" both start at ${clockText(startMin)}.`);
+    }
+    out.push({ name, startMin });
+  }
+  return out.sort((a, b) => a.startMin - b.startMin);
+}
+
+const addWalk = (a: Walk, b: Walk): Walk => ({
+  ms: { run: a.ms.run + b.ms.run, planned: a.ms.planned + b.ms.planned, down: a.ms.down + b.ms.down },
+  stops: a.stops + b.stops,
+  shortStops: a.shortStops + b.shortStops,
+  shortMs: a.shortMs + b.shortMs,
+});
+const emptyWalk = (): Walk => ({ ms: { run: 0, planned: 0, down: 0 }, stops: 0, shortStops: 0, shortMs: 0 });
+
 /** Wall-clock text for epoch ms shifted by the offset: "2026-11-12 07:00:00" (+ ".250" when there are ms). */
 function wallText(ms: number, offsetMin: number, zoned: boolean): string {
   const d = new Date(ms + offsetMin * 60_000);
@@ -429,18 +493,10 @@ export function analyze(states: StateLog, counts: CountLog | undefined, s: Setti
     findings.push({ kind: 'below-target', machine: null, message: `All machines: OEE ${oeePct}% is below the ${settings.targetPct}% target.` });
   }
 
-  // Per-day tables: [from, to) cut at each day start; a count stamped exactly on a day start belongs to the day before
-  // (it closes that day's last interval), so the days add up to the window.
-  let days: DayStats[] | undefined;
-  let dayStart: Report['dayStart'];
-  if (s.byDay) {
-    const dm = /^(\d{1,2}):(\d{2})$/.exec((s.dayStart ?? '00:00').trim());
-    if (!dm || Number(dm[1]) > 23 || Number(dm[2]) > 59) {
-      throw new InputError(`--day-start "${s.dayStart}" is not a time of day like 07:00.`);
-    }
-    const startMin = Number(dm[1]) * 60 + Number(dm[2]);
-    let offsetMin = 0;
-    let offsetText: string | null = null;
+  // Day and shift boundaries are wall-clock times: epoch ms + offset (files with offsets) or as written.
+  let offsetMin = 0;
+  let offsetText: string | null = null;
+  if (s.byDay || s.shifts !== undefined) {
     if (states.zoned) {
       const own = /(Z|[+-]\d{2}:?\d{2})$/.exec(firstRow.text.trim());
       offsetText = s.dayOffset ?? (own ? own[1] : 'Z');
@@ -448,13 +504,36 @@ export function analyze(states: StateLog, counts: CountLog | undefined, s: Setti
     } else if (s.dayOffset !== undefined) {
       throw new InputError('--day-offset is only for files whose timestamps carry a zone offset.');
     }
-    // Wall clock is epoch ms + offset; the first day start at or before `from`.
+    if ((to - from) / DAY_MS > 400) {
+      throw new InputError(`--by-day / --shifts cover at most 400 days; narrow the window with --from / --to.`);
+    }
+  }
+  if ((s.dayStart !== undefined && !s.byDay) || (s.dayOffset !== undefined && !s.byDay && s.shifts === undefined)) {
+    throw new InputError('--day-start and --day-offset need --by-day (--day-offset also works with --shifts).');
+  }
+  const countsGiven = counts !== undefined;
+  const sliceStats = (a: number, b: number, p: Map<string, { total: number; good: number }>) =>
+    machineNames.map((machine) =>
+      machineStats(
+        machine,
+        walk(byMachine.get(machine) as StateRow[], a, b, classOf, settings.shortStopS),
+        b - a,
+        p.get(machine) ?? { total: 0, good: 0 },
+        ideal.get(machine) ?? null,
+        countsGiven,
+      ),
+    );
+
+  // Per-day tables: [from, to) cut at each day start; a count stamped exactly on a day start belongs to the day before
+  // (it closes that day's last interval), so the days add up to the window.
+  let days: DayStats[] | undefined;
+  let dayStart: Report['dayStart'];
+  if (s.byDay) {
+    const startMin = clockMinutes(s.dayStart ?? '00:00', '--day-start');
+    // The first day start at or before `from`.
     const shift = offsetMin * 60_000 - startMin * 60_000;
     const first = Math.floor((from + shift) / DAY_MS) * DAY_MS - shift;
     const count = Math.ceil((to - first) / DAY_MS);
-    if (count > 400) {
-      throw new InputError(`--by-day would give ${count} days; narrow the window with --from / --to (at most 400 days).`);
-    }
     const edges = Array.from({ length: count + 1 }, (_, i) => Math.min(Math.max(first + i * DAY_MS, from), to));
     const dayParts = Array.from({ length: count }, () => new Map<string, { total: number; good: number }>());
     for (const c of countRows) {
@@ -471,28 +550,89 @@ export function analyze(states: StateLog, counts: CountLog | undefined, s: Setti
     for (let i = 0; i < count; i++) {
       const a = edges[i];
       const b = edges[i + 1];
-      const dayMachines = machineNames.map((machine) =>
-        machineStats(
-          machine,
-          walk(byMachine.get(machine) as StateRow[], a, b, classOf, settings.shortStopS),
-          b - a,
-          dayParts[i].get(machine) ?? { total: 0, good: 0 },
-          ideal.get(machine) ?? null,
-          counts !== undefined,
-        ),
-      );
+      const dayMachines = sliceStats(a, b, dayParts[i]);
       days.push({
         day: wallText(first + i * DAY_MS, offsetMin, false).slice(0, 10),
         from: wallText(a, offsetMin, states.zoned),
         to: wallText(b, offsetMin, states.zoned),
         seconds: sec(b - a),
         machines: dayMachines,
-        total: totalOf(dayMachines, counts !== undefined),
+        total: totalOf(dayMachines, countsGiven),
       });
     }
-    dayStart = { time: `${pad(Math.floor(startMin / 60))}:${dm[2]}`, offset: offsetText };
-  } else if (s.dayStart !== undefined || s.dayOffset !== undefined) {
-    throw new InputError('--day-start and --day-offset need --by-day.');
+    dayStart = { time: clockText(startMin), offset: offsetText };
+  }
+
+  // Per-shift tables: the window cut at every shift start; each shift's periods are summed over all days. Counts go
+  // to the period they close, (start, end], like the day tables, so the shifts add up to the window.
+  let shiftTables: ShiftStats[] | undefined;
+  if (s.shifts !== undefined) {
+    const defs = parseShifts(s.shifts);
+    const offMs = offsetMin * 60_000;
+    // Wall-clock midnight of the day before `from`, so the first mark is at or before `from`.
+    const base = Math.floor((from + offMs) / DAY_MS) * DAY_MS - offMs - DAY_MS;
+    const marks: { t: number; k: number }[] = [];
+    for (let d = 0, done = false; !done; d++) {
+      for (let k = 0; k < defs.length; k++) {
+        const t = base + d * DAY_MS + defs[k].startMin * 60_000;
+        if (t >= to) {
+          done = true;
+          break;
+        }
+        if (t <= from) marks.length = 0;
+        marks.push({ t, k });
+      }
+    }
+    const periods = marks.map((m, j) => ({ k: m.k, a: Math.max(m.t, from), b: j + 1 < marks.length ? marks[j + 1].t : to }));
+    const acc = defs.map(() => ({
+      periods: 0,
+      ms: 0,
+      walks: new Map<string, Walk>(),
+      parts: new Map<string, { total: number; good: number }>(),
+    }));
+    for (const per of periods) {
+      const e = acc[per.k];
+      e.periods++;
+      e.ms += per.b - per.a;
+      for (const machine of machineNames) {
+        const w = walk(byMachine.get(machine) as StateRow[], per.a, per.b, classOf, settings.shortStopS);
+        e.walks.set(machine, addWalk(e.walks.get(machine) ?? emptyWalk(), w));
+      }
+    }
+    for (const c of countRows) {
+      if (c.time < from || c.time > to || !byMachine.has(c.machine)) continue;
+      // First period whose end is at or after the count.
+      let lo = 0;
+      let hi = periods.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (periods[mid].b >= c.time) hi = mid;
+        else lo = mid + 1;
+      }
+      const parts = acc[periods[lo].k].parts;
+      const m = parts.get(c.machine) ?? { total: 0, good: 0 };
+      m.total += c.total;
+      m.good += c.good;
+      parts.set(c.machine, m);
+    }
+    const tables: ShiftStats[] = [];
+    defs.forEach((def, k) => {
+      const e = acc[k];
+      if (e.periods === 0) return;
+      const list = machineNames.map((machine) =>
+        machineStats(machine, e.walks.get(machine) ?? emptyWalk(), e.ms, e.parts.get(machine) ?? { total: 0, good: 0 }, ideal.get(machine) ?? null, countsGiven),
+      );
+      tables.push({
+        shift: def.name,
+        start: clockText(def.startMin),
+        end: clockText(defs[(k + 1) % defs.length].startMin),
+        periods: e.periods,
+        seconds: sec(e.ms),
+        machines: list,
+        total: totalOf(list, countsGiven),
+      });
+    });
+    shiftTables = tables;
   }
 
   const downMs = [...pareto.values()].reduce((t, e) => t + e.ms, 0);
@@ -518,6 +658,7 @@ export function analyze(states: StateLog, counts: CountLog | undefined, s: Setti
     machines,
     total,
     ...(days ? { days, dayStart } : {}),
+    ...(shiftTables ? { shifts: shiftTables, shiftOffset: offsetText } : {}),
     pareto: paretoRows,
     counts: { given: counts !== undefined, rows: countRows.length, outsideWindow, unknownMachine },
     findings,
