@@ -124,3 +124,21 @@ describe('cli: --by-day', () => {
     expect(err).toContain('need --by-day');
   });
 });
+
+describe('cli: --shifts', () => {
+  it('text and markdown show the shift table', () => {
+    expect(main([...full, '--shifts', 'A=06:00,B=14:00,C=22:00'])).toBe(0);
+    expect(out).toContain('By shift (each shift summed over every day in the window: A 1x, B 1x;');
+    expect(out).toMatch(/A 06:00-14:00 M1\s+5 h 45 min/);
+    expect(out).toMatch(/B 14:00-22:00 All\s+12 h 0 min .* 73\.51% +900 \(885 good\)/);
+    out = '';
+    expect(main([...full, '--shifts', 'A=06:00,B=14:00', '--md'])).toBe(0);
+    expect(out).toContain('## By shift');
+    expect(out).toContain('| B 14:00-06:00 All |');
+    out = '';
+    expect(main([...full, '--shifts', 'A=06:00', '--json'])).toBe(0);
+    expect(JSON.parse(out).shifts[0]).toMatchObject({ shift: 'A', periods: 1, seconds: 43200 });
+    expect(main([...full, '--shifts', 'A'])).toBe(2);
+    expect(err).toContain('is not name=HH:MM');
+  });
+});

@@ -21,6 +21,7 @@ node dist/cli.js examples/states-example.csv --counts examples/counts-example.cs
 node dist/cli.js examples/states-example.csv --counts examples/counts-example.csv --ideal-cycle 30 --target 80 --md
 node dist/cli.js line.csv --counts parts.csv --ideal-cycle 12 --from "2026-11-02 08:00" --to "2026-11-02 20:00" --json
 node dist/cli.js line.csv --counts parts.csv --ideal-cycle 12 --by-day --day-start 07:00   # one row per day and machine
+node dist/cli.js line.csv --counts parts.csv --ideal-cycle 12 --shifts A=07:00,B=15:00,C=23:00   # one row per shift and machine
 ```
 
 `examples/` holds **example data** (made up for this README): two machines over one 12-hour shift, with a break, a
@@ -61,6 +62,19 @@ given. Day tables raise no findings of their own; at most 400 days per run.
 
 On the example with `--by-day --day-start 14:00`, M1 has 5 h 45 min + 6 h 0 min of planned production and 552 + 548
 parts, which add up to the 11 h 45 min and 1,100 parts above.
+
+### Per shift (`--shifts`)
+
+`--shifts Day=07:00,Night=19:00` (or `A=07:00,B=15:00,C=23:00`) gives a shift calendar: each shift starts at its
+time every day and lasts until the next shift starts. The report adds a table per shift (per machine and `All`) with
+the same columns, each shift summed over every day in the window (the title says how many times each shift falls in
+it), and `shifts` in `--json`. Shifts add up to the window the same way days do: a stop across a shift change counts
+in both shifts and a count stamped exactly on a shift change closes the shift before. A shift that never falls in
+the window is left out. For files with offsets, shift times use the first state row's offset unless `--day-offset`
+is given. `--shifts` works with or without `--by-day`; shift tables raise no findings of their own.
+
+On the example with `--shifts A=06:00,B=14:00,C=22:00`, shift A has the same 5 h 45 min and 552 parts for M1 as
+the first day above, and C is left out (the window ends at 20:00).
 
 ### Input
 
@@ -116,7 +130,7 @@ CI runs the same on Node 20 and 22. The smoke test also runs 20 machines x 90 da
 
 ## Not yet
 
-Shift calendar and per-shift tables, running-counter input with resets, changeover as its own class.
+Running-counter input with resets, changeover as its own class, per-shift-per-day tables.
 Presets for specific MES / SCADA export layouts need real sample files.
 
 ## License

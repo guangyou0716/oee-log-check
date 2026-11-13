@@ -69,6 +69,17 @@ if (byDay.status !== 0 || dd.days?.length !== 90 || Math.abs(sumDays((x) => x.ru
 }
 console.log(`smoke: ok --by-day on the big log: 90 days add up to the window in ${Date.now() - startedDays} ms`);
 
+const startedShifts = Date.now();
+const byShift = run(cli, [bigS, '--counts', bigC, '--ideal-cycle', '30', '--json', '--shifts', 'A=07:00,B=15:00,C=23:00']);
+const sd = byShift.stdout ? JSON.parse(byShift.stdout) : {};
+const sumShifts = (f) => (sd.shifts ?? []).reduce((a, x) => a + f(x), 0);
+if (byShift.status !== 0 || sd.shifts?.length !== 3 || Math.abs(sumShifts((x) => x.total.runS) - t.runS) > 0.01 ||
+  sumShifts((x) => x.total.totalParts) !== t.totalParts || sumShifts((x) => x.seconds) !== data.window.seconds ||
+  sd.shifts.map((x) => x.periods).join() !== '90,90,91') {
+  fail(`big log --shifts: status ${byShift.status} ${JSON.stringify(sd.shifts?.map((x) => [x.shift, x.periods, x.seconds]))} ${byShift.stderr}`);
+}
+console.log(`smoke: ok --shifts on the big log: 3 shifts (90/90/91 periods) add up to the window in ${Date.now() - startedShifts} ms`);
+
 const bad = run(cli, [states, '--json', '--md']);
 if (bad.status !== 2 || !bad.stderr.includes('either --json or --md')) {
   fail(`bad flags: status ${bad.status} ${bad.stderr}`);

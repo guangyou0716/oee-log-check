@@ -54,6 +54,30 @@ function dayTitle(r: Report): string {
   return `By day (a day starts at ${ds?.time ?? '00:00'}${ds?.offset ? ` ${ds.offset}` : ''}; a stop across a day start counts in both days)`;
 }
 
+function shiftRows(r: Report): string[][] {
+  const out: string[][] = [];
+  for (const sh of r.shifts ?? []) {
+    const label = `${sh.shift} ${sh.start}-${sh.end}`;
+    if (r.machines.length > 1) {
+      for (const m of sh.machines) out.push(cells(r, `${label} ${m.machine}`, m));
+      out.push(cells(r, `${label} All`, sh.total));
+    } else {
+      out.push(cells(r, label, sh.total));
+    }
+  }
+  return out;
+}
+
+function shiftHeads(r: Report): string[] {
+  return [r.machines.length > 1 ? 'Shift / machine' : 'Shift', ...heads(r).slice(1)];
+}
+
+function shiftTitle(r: Report): string {
+  const times = (r.shifts ?? []).map((sh) => `${sh.shift} ${sh.periods}x`).join(', ');
+  const off = r.shiftOffset ? ` at ${r.shiftOffset}` : '';
+  return `By shift${off} (each shift summed over every day in the window: ${times}; a stop across a shift change counts in both shifts)`;
+}
+
 function table(head: string[], body: string[][], right: (i: number) => boolean): string[] {
   const widths = head.map((h, i) => Math.max(h.length, ...body.map((b) => b[i].length)));
   const fmt = (cols: string[]) =>
@@ -96,6 +120,11 @@ export function textReport(r: Report): string {
     lines.push(...table(dayHeads(r), dayRows(r), (i) => i > 0 && i < 11));
     lines.push('');
   }
+  if (r.shifts) {
+    lines.push(`${shiftTitle(r)}:`);
+    lines.push(...table(shiftHeads(r), shiftRows(r), (i) => i > 0 && i < 11));
+    lines.push('');
+  }
   if (r.pareto.length) {
     lines.push('Downtime by reason (state when there is no reason):');
     lines.push(...table(paretoHeads, paretoCells(r), (i) => i >= 1 && i <= 4));
@@ -120,6 +149,7 @@ const mdTable = (head: string[], body: string[][]) => [md(head), md(head.map(() 
 export function markdownReport(r: Report): string {
   const lines = ['# OEE report', '', ...header(r).map((h) => `- ${h.trim()}`), '', '## Machines', '', ...mdTable(heads(r), rows(r)), ''];
   if (r.days) lines.push('## By day', '', `${dayTitle(r)}.`, '', ...mdTable(dayHeads(r), dayRows(r)), '');
+  if (r.shifts) lines.push('## By shift', '', `${shiftTitle(r)}.`, '', ...mdTable(shiftHeads(r), shiftRows(r)), '');
   lines.push('## Downtime by reason', '');
   if (r.pareto.length) {
     lines.push(...mdTable(paretoHeads, paretoCells(r)), '');

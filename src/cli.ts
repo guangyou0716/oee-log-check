@@ -35,7 +35,9 @@ Options:
   --target <pct>             OEE target: machines (and the total) below it are findings
   --by-day                   also a table per day (and per machine): times, availability, performance, quality, OEE
   --day-start <HH:MM>        time of day a day starts for --by-day (default 00:00; e.g. 07:00 for a 7am first shift)
-  --day-offset <+HH:MM>      zone offset for day boundaries when the files carry offsets (default the first row's)
+  --day-offset <+HH:MM>      zone offset for day and shift boundaries when the files carry offsets (default the first row's)
+  --shifts <name=HH:MM,...>  shift calendar, e.g. Day=07:00,Night=19:00: each shift lasts until the next starts;
+                             adds a table per shift (and per machine), each shift summed over every day
   --time-column <name>       states timestamp column (default timestamp)
   --machine-column <name>    states machine column (default machine, optional)
   --state-column <name>      states state column (default state)
@@ -113,6 +115,7 @@ export function main(argv: string[]): number {
         'by-day': { type: 'boolean', default: false },
         'day-start': { type: 'string' },
         'day-offset': { type: 'string' },
+        shifts: { type: 'string' },
         'time-column': { type: 'string' },
         'machine-column': { type: 'string' },
         'state-column': { type: 'string' },
@@ -168,6 +171,7 @@ export function main(argv: string[]): number {
       byDay: values['by-day'],
       dayStart: values['day-start'],
       dayOffset: values['day-offset'],
+      shifts: values.shifts,
     });
     process.stdout.write(values.json ? jsonReport(report) : values.md ? markdownReport(report) : textReport(report));
     return report.findings.length ? 1 : 0;
