@@ -5,9 +5,28 @@ type Row = Omit<MachineStats, 'machine' | 'idealCycleS'>;
 const p = (v: number | null) => (v === null ? '-' : `${v}%`);
 const partsCell = (r: Report, m: Row) => (r.counts.given ? `${m.totalParts} (${m.goodParts} good)` : '-');
 
+const co = (r: Report) => r.settings.changeoverStates.length > 0;
+
 function heads(r: Report): string[] {
-  return ['Machine', 'Planned prod.', 'Run', 'Down', 'Stops', 'Planned stop', 'No data', 'Avail.', 'Perf.', 'Quality', 'OEE', ...(r.counts.given ? ['Parts'] : [])];
+  return [
+    'Machine',
+    'Planned prod.',
+    'Run',
+    'Down',
+    'Stops',
+    ...(co(r) ? ['Changeover', 'C/O'] : []),
+    'Planned stop',
+    'No data',
+    'Avail.',
+    'Perf.',
+    'Quality',
+    'OEE',
+    ...(r.counts.given ? ['Parts'] : []),
+  ];
 }
+
+/** Numeric columns (right-aligned): everything between the name and the parts column. */
+const numeric = (r: Report) => (i: number) => i > 0 && i < (co(r) ? 13 : 11);
 
 function cells(r: Report, name: string, m: Row): string[] {
   return [
@@ -16,6 +35,7 @@ function cells(r: Report, name: string, m: Row): string[] {
     dur(m.runS),
     dur(m.downS),
     String(m.stops),
+    ...(co(r) ? [dur(m.changeoverS), String(m.changeovers)] : []),
     dur(m.plannedStopS),
     dur(m.noDataS),
     p(m.availabilityPct),
@@ -93,10 +113,11 @@ function header(r: Report): string[] {
   const s = r.settings;
   const st = r.states;
   const list = (xs: string[]) => (xs.length ? xs.join(', ') : 'none seen');
+  const withCo = co(r);
   return [
     `Window: ${r.window.from} .. ${r.window.to} (${dur(r.window.seconds)})${r.window.endFromInput ? ', end = latest timestamp in the input' : ''}`,
-    `States seen: run = ${list(st.run)}; planned stop = ${list(st.planned)}; downtime = ${list(st.down)}`,
-    `  (run states: ${s.runStates.join(', ')}; planned-stop states: ${s.plannedStates.join(', ')}; anything else is downtime)`,
+    `States seen: run = ${list(st.run)}; planned stop = ${list(st.planned)}; ${withCo ? `changeover = ${list(st.changeover)}; ` : ''}downtime = ${list(st.down)}`,
+    `  (run states: ${s.runStates.join(', ')}; planned-stop states: ${s.plannedStates.join(', ')}${withCo ? `; changeover states: ${s.changeoverStates.join(', ')}` : ''}; anything else is downtime)`,
   ];
 }
 
@@ -124,28 +145,38 @@ function notes(r: Report): string[] {
 }
 
 const paretoHeads = ['Reason', 'Stops', 'Time', 'Share', 'Cum.', 'Machines'];
-const paretoCells = (r: Report) => r.pareto.map((e) => [e.reason, String(e.stops), dur(e.seconds), `${e.sharePct}%`, `${e.cumulativePct}%`, e.machines.join(', ')]);
+const changeoverHeads = ['Reason', 'Changeovers', 'Time', 'Share', 'Cum.', 'Machines'];
+const paretoCells = (rows: Report['pareto']) => rows.map((e) => [e.reason, String(e.stops), dur(e.seconds), `${e.sharePct}%`, `${e.cumulativePct}%`, e.machines.join(', ')]);
 
 export function textReport(r: Report): string {
   const lines = [...header(r), ''];
-  lines.push(...table(heads(r), rows(r), (i) => i > 0 && i < 11));
+  lines.push(...table(heads(r), rows(r), numeric(r)));
   lines.push('');
   if (r.days) {
     lines.push(`${dayTitle(r)}:`);
-    lines.push(...table(dayHeads(r), dayRows(r), (i) => i > 0 && i < 11));
+    lines.push(...table(dayHeads(r), dayRows(r), numeric(r)));
     lines.push('');
   }
   if (r.shifts) {
     lines.push(`${shiftTitle(r)}:`);
-    lines.push(...table(shiftHeads(r), shiftRows(r), (i) => i > 0 && i < 11));
+    lines.push(...table(shiftHeads(r), shiftRows(r), numeric(r)));
     lines.push('');
   }
   if (r.pareto.length) {
     lines.push('Downtime by reason (state when there is no reason):');
-    lines.push(...table(paretoHeads, paretoCells(r), (i) => i >= 1 && i <= 4));
+    lines.push(...table(paretoHeads, paretoCells(r.pareto), (i) => i >= 1 && i <= 4));
     lines.push(`Short stops (< ${dur(r.settings.shortStopS)}): ${r.total.shortStops} stop(s), ${dur(r.total.shortStopS)} (counted as downtime)`);
   } else {
     lines.push('Downtime by reason: no downtime in the window.');
+  }
+  if (r.changeoverReasons) {
+    lines.push('');
+    if (r.changeoverReasons.length) {
+      lines.push(`Changeover by reason (availability loss, not in downtime or stops): ${r.total.changeovers} changeover(s), ${dur(r.total.changeoverS)}`);
+      lines.push(...table(changeoverHeads, paretoCells(r.changeoverReasons), (i) => i >= 1 && i <= 4));
+    } else {
+      lines.push('Changeover by reason: no changeover in the window.');
+    }
   }
   for (const n of notes(r)) lines.push(`Note: ${n}`);
   lines.push('');
@@ -167,10 +198,19 @@ export function markdownReport(r: Report): string {
   if (r.shifts) lines.push('## By shift', '', `${shiftTitle(r)}.`, '', ...mdTable(shiftHeads(r), shiftRows(r)), '');
   lines.push('## Downtime by reason', '');
   if (r.pareto.length) {
-    lines.push(...mdTable(paretoHeads, paretoCells(r)), '');
+    lines.push(...mdTable(paretoHeads, paretoCells(r.pareto)), '');
     lines.push(`Short stops (< ${dur(r.settings.shortStopS)}): ${r.total.shortStops} stop(s), ${dur(r.total.shortStopS)} (counted as downtime)`, '');
   } else {
     lines.push('No downtime in the window.', '');
+  }
+  if (r.changeoverReasons) {
+    lines.push('## Changeover by reason', '');
+    if (r.changeoverReasons.length) {
+      lines.push(`Availability loss, not in downtime or stops: ${r.total.changeovers} changeover(s), ${dur(r.total.changeoverS)}.`, '');
+      lines.push(...mdTable(changeoverHeads, paretoCells(r.changeoverReasons)), '');
+    } else {
+      lines.push('No changeover in the window.', '');
+    }
   }
   for (const n of notes(r)) lines.push(`> ${n}`, '');
   lines.push('## Findings', '');

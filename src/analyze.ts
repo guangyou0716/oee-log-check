@@ -2,13 +2,18 @@ import { InputError } from './errors.js';
 import type { CounterInfo, CountLog, StateLog, StateRow } from './input.js';
 import { parseTimestamp } from './time.js';
 
-export type StateClass = 'run' | 'planned' | 'down';
+export type StateClass = 'run' | 'planned' | 'down' | 'changeover';
 
 export interface Settings {
   /** States that count as running (matched without case). */
   runStates?: string[];
   /** States that count as planned stops (not in planned production time). */
   plannedStates?: string[];
+  /**
+   * States that count as changeover / setup (default none): still availability loss (inside planned production time),
+   * but kept apart from downtime, stops, short stops and the downtime Pareto.
+   */
+  changeoverStates?: string[];
   /** Ideal cycle time in seconds per part: one value for every machine, or per machine. */
   idealCycleS?: number | Record<string, number>;
   /** Window start / end, ISO 8601 (same zone style as the files). */
@@ -31,16 +36,22 @@ export interface Settings {
 export interface ResolvedSettings {
   runStates: string[];
   plannedStates: string[];
+  changeoverStates: string[];
   shortStopS: number;
   targetPct: number | null;
 }
 
 export interface MachineStats {
   machine: string;
-  /** Planned production time = run + downtime (window minus planned stops and time with no data). */
+  /** Planned production time = run + downtime + changeover (window minus planned stops and time with no data). */
   plannedProductionS: number;
   runS: number;
+  /** Unplanned downtime, changeover not included. */
   downS: number;
+  /** Time in a changeover state (0 when no changeover states are set). */
+  changeoverS: number;
+  /** Changeover segments (a changeover across a day or shift boundary counts in both). */
+  changeovers: number;
   plannedStopS: number;
   /** Time in the window before the machine's first state row (or with no rows at all). */
   noDataS: number;
@@ -112,6 +123,8 @@ export interface Report {
   /** With shifts: the offset used for shift boundaries (null for files without offsets). */
   shiftOffset?: string | null;
   pareto: ParetoRow[];
+  /** Changeover time by reason (state when no reason), only when changeover states are set. */
+  changeoverReasons?: ParetoRow[];
   counts: { given: boolean; rows: number; outsideWindow: number; unknownMachine: number; counter?: CounterInfo };
   findings: Finding[];
 }
@@ -137,12 +150,22 @@ export function resolveSettings(s: Settings): ResolvedSettings {
   const norm = (list: string[] | undefined, fallback: string[]) => (list ?? fallback).map((x) => x.trim().toLowerCase()).filter((x) => x !== '');
   const runStates = norm(s.runStates, DEFAULT_RUN);
   const plannedStates = norm(s.plannedStates, DEFAULT_PLANNED);
+  const changeoverStates = norm(s.changeoverStates, []);
   if (runStates.length === 0) {
     throw new InputError('Give at least one run state.');
   }
   const both = runStates.find((x) => plannedStates.includes(x));
   if (both) {
     throw new InputError(`State "${both}" is both a run state and a planned-stop state.`);
+  }
+  for (const [other, label] of [
+    [runStates, 'run'],
+    [plannedStates, 'planned-stop'],
+  ] as const) {
+    const clash = changeoverStates.find((x) => other.includes(x));
+    if (clash) {
+      throw new InputError(`State "${clash}" is both a changeover state and a ${label} state.`);
+    }
   }
   const shortStopS = s.shortStopS ?? 300;
   if (!(shortStopS >= 0)) {
@@ -151,7 +174,7 @@ export function resolveSettings(s: Settings): ResolvedSettings {
   if (s.targetPct !== undefined && !(s.targetPct > 0 && s.targetPct <= 100)) {
     throw new InputError('--target must be above 0 and at most 100 (percent).');
   }
-  return { runStates, plannedStates, shortStopS, targetPct: s.targetPct ?? null };
+  return { runStates, plannedStates, changeoverStates, shortStopS, targetPct: s.targetPct ?? null };
 }
 
 
@@ -160,6 +183,7 @@ interface Walk {
   stops: number;
   shortStops: number;
   shortMs: number;
+  changeovers: number;
 }
 
 /** Index of the last row starting at or before t (0 when every row starts later); rows are sorted by time. */
@@ -183,7 +207,8 @@ function walk(
   shortStopS: number,
   onSegment?: (row: StateRow, cls: StateClass, ms: number) => void,
 ): Walk {
-  const ms: Record<StateClass, number> = { run: 0, planned: 0, down: 0 };
+  const ms: Record<StateClass, number> = { run: 0, planned: 0, down: 0, changeover: 0 };
+  let changeovers = 0;
   let stops = 0;
   let shortStops = 0;
   let shortMs = 0;
@@ -200,10 +225,12 @@ function walk(
         shortStops++;
         shortMs += end - start;
       }
+    } else if (cls === 'changeover') {
+      changeovers++;
     }
     onSegment?.(row, cls, end - start);
   }
-  return { ms, stops, shortStops, shortMs };
+  return { ms, stops, shortStops, shortMs, changeovers };
 }
 
 function machineStats(
@@ -215,8 +242,8 @@ function machineStats(
   countsGiven: boolean,
 ): MachineStats {
   const { ms } = w;
-  const noDataMs = windowMs - ms.run - ms.planned - ms.down;
-  const prod = ms.run + ms.down;
+  const noDataMs = windowMs - ms.run - ms.planned - ms.down - ms.changeover;
+  const prod = ms.run + ms.down + ms.changeover;
   const availabilityPct = pct(ms.run, prod);
   const performancePct = countsGiven && cycle !== null && ms.run > 0 ? pct(cycle * p.total * 1000, ms.run) : null;
   const qualityPct = countsGiven ? pct(p.good, p.total) : null;
@@ -228,6 +255,8 @@ function machineStats(
     plannedProductionS: sec(prod),
     runS: sec(ms.run),
     downS: sec(ms.down),
+    changeoverS: sec(ms.changeover),
+    changeovers: w.changeovers,
     plannedStopS: sec(ms.planned),
     noDataS: sec(noDataMs),
     stops: w.stops,
@@ -263,6 +292,8 @@ function totalOf(machines: MachineStats[], countsGiven: boolean): TotalStats {
     plannedProductionS: round3(prodS),
     runS: round3(runS),
     downS: round3(sum((m) => m.downS)),
+    changeoverS: round3(sum((m) => m.changeoverS)),
+    changeovers: sum((m) => m.changeovers),
     plannedStopS: round3(sum((m) => m.plannedStopS)),
     noDataS: round3(sum((m) => m.noDataS)),
     stops: sum((m) => m.stops),
@@ -328,12 +359,13 @@ export function parseShifts(text: string): ShiftDef[] {
 }
 
 const addWalk = (a: Walk, b: Walk): Walk => ({
-  ms: { run: a.ms.run + b.ms.run, planned: a.ms.planned + b.ms.planned, down: a.ms.down + b.ms.down },
+  ms: { run: a.ms.run + b.ms.run, planned: a.ms.planned + b.ms.planned, down: a.ms.down + b.ms.down, changeover: a.ms.changeover + b.ms.changeover },
   stops: a.stops + b.stops,
+  changeovers: a.changeovers + b.changeovers,
   shortStops: a.shortStops + b.shortStops,
   shortMs: a.shortMs + b.shortMs,
 });
-const emptyWalk = (): Walk => ({ ms: { run: 0, planned: 0, down: 0 }, stops: 0, shortStops: 0, shortMs: 0 });
+const emptyWalk = (): Walk => ({ ms: { run: 0, planned: 0, down: 0, changeover: 0 }, stops: 0, shortStops: 0, shortMs: 0, changeovers: 0 });
 
 /** Wall-clock text for epoch ms shifted by the offset: "2026-11-12 07:00:00" (+ ".250" when there are ms). */
 function wallText(ms: number, offsetMin: number, zoned: boolean): string {
@@ -350,7 +382,9 @@ export function analyze(states: StateLog, counts: CountLog | undefined, s: Setti
   const settings = resolveSettings(s);
   const classOf = (state: string): StateClass => {
     const key = state.toLowerCase();
-    return settings.runStates.includes(key) ? 'run' : settings.plannedStates.includes(key) ? 'planned' : 'down';
+    if (settings.runStates.includes(key)) return 'run';
+    if (settings.plannedStates.includes(key)) return 'planned';
+    return settings.changeoverStates.includes(key) ? 'changeover' : 'down';
   };
 
   if (counts && counts.zoned !== undefined && counts.zoned !== states.zoned) {
@@ -413,8 +447,10 @@ export function analyze(states: StateLog, counts: CountLog | undefined, s: Setti
     endFromInput: s.to === undefined,
   };
 
-  const seen: Record<StateClass, Map<string, string>> = { run: new Map(), planned: new Map(), down: new Map() };
-  const pareto = new Map<string, { reason: string; stops: number; ms: number; machines: Set<string> }>();
+  const seen: Record<StateClass, Map<string, string>> = { run: new Map(), planned: new Map(), down: new Map(), changeover: new Map() };
+  type ReasonTally = Map<string, { reason: string; stops: number; ms: number; machines: Set<string> }>;
+  const pareto: ReasonTally = new Map();
+  const changeoverTally: ReasonTally = new Map();
   const findings: Finding[] = [];
   const machines: MachineStats[] = [];
 
@@ -449,14 +485,15 @@ export function analyze(states: StateLog, counts: CountLog | undefined, s: Setti
     const w = walk(list, from, to, classOf, settings.shortStopS, (row, cls, len) => {
       const key = row.state.toLowerCase();
       if (!seen[cls].has(key)) seen[cls].set(key, row.state);
-      if (cls === 'down') {
+      if (cls === 'down' || cls === 'changeover') {
+        const tally = cls === 'down' ? pareto : changeoverTally;
         const reason = row.reason || row.state;
         const pk = reason.toLowerCase();
-        const entry = pareto.get(pk) ?? { reason, stops: 0, ms: 0, machines: new Set<string>() };
+        const entry = tally.get(pk) ?? { reason, stops: 0, ms: 0, machines: new Set<string>() };
         entry.stops++;
         entry.ms += len;
         entry.machines.add(machine);
-        pareto.set(pk, entry);
+        tally.set(pk, entry);
       }
     });
     const ms = w.ms;
@@ -635,31 +672,41 @@ export function analyze(states: StateLog, counts: CountLog | undefined, s: Setti
     shiftTables = tables;
   }
 
-  const downMs = [...pareto.values()].reduce((t, e) => t + e.ms, 0);
-  let cumulative = 0;
-  const paretoRows = [...pareto.values()]
-    .sort((a, b) => b.ms - a.ms || b.stops - a.stops || a.reason.localeCompare(b.reason))
-    .map((e) => {
-      cumulative += e.ms;
-      return {
-        reason: e.reason,
-        stops: e.stops,
-        seconds: sec(e.ms),
-        sharePct: pct(e.ms, downMs) ?? 0,
-        cumulativePct: pct(cumulative, downMs) ?? 0,
-        machines: [...e.machines],
-      };
-    });
+  const ranked = (tally: ReasonTally): ParetoRow[] => {
+    const allMs = [...tally.values()].reduce((t, e) => t + e.ms, 0);
+    let cumulative = 0;
+    return [...tally.values()]
+      .sort((a, b) => b.ms - a.ms || b.stops - a.stops || a.reason.localeCompare(b.reason))
+      .map((e) => {
+        cumulative += e.ms;
+        return {
+          reason: e.reason,
+          stops: e.stops,
+          seconds: sec(e.ms),
+          sharePct: pct(e.ms, allMs) ?? 0,
+          cumulativePct: pct(cumulative, allMs) ?? 0,
+          machines: [...e.machines],
+        };
+      });
+  };
+  const paretoRows = ranked(pareto);
+  const withChangeover = settings.changeoverStates.length > 0;
 
   return {
     settings,
     window,
-    states: { run: [...seen.run.values()], planned: [...seen.planned.values()], down: [...seen.down.values()] },
+    states: {
+      run: [...seen.run.values()],
+      planned: [...seen.planned.values()],
+      down: [...seen.down.values()],
+      changeover: [...seen.changeover.values()],
+    },
     machines,
     total,
     ...(days ? { days, dayStart } : {}),
     ...(shiftTables ? { shifts: shiftTables, shiftOffset: offsetText } : {}),
     pareto: paretoRows,
+    ...(withChangeover ? { changeoverReasons: ranked(changeoverTally) } : {}),
     counts: {
       given: counts !== undefined,
       rows: countRows.length,

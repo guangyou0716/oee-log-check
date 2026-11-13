@@ -19,7 +19,9 @@ describe('analyze: example (numbers worked out by hand in the README)', () => {
     expect(m2).toMatchObject({ availabilityPct: 89.52, performancePct: 93.09, qualityPct: 98.43, oeePct: 82.02 });
     expect(r.total).toMatchObject({ plannedProductionS: 1335 * 60, availabilityPct: 89.21, performancePct: 90.26, qualityPct: 98.17, oeePct: 79.08 });
     expect(r.window).toEqual({ from: '2026-11-02 08:00:00', to: '2026-11-02 20:00:00', seconds: 43200, endFromInput: true });
-    expect(r.states).toEqual({ run: ['RUN'], planned: ['BREAK'], down: ['DOWN', 'SETUP'] });
+    expect(r.states).toEqual({ run: ['RUN'], planned: ['BREAK'], down: ['DOWN', 'SETUP'], changeover: [] });
+    expect(r.machines[0]).toMatchObject({ changeoverS: 0, changeovers: 0 });
+    expect(r.changeoverReasons).toBeUndefined();
     expect(r.findings).toEqual([]);
   });
   it('Pareto merges reasons without case, sorted by time with cumulative share', () => {
@@ -265,5 +267,53 @@ describe('analyze: --shifts', () => {
     const z = parseStates('timestamp,state\n2026-01-01T00:00:00Z,RUN\n2026-01-02T00:00:00Z,DOWN\n');
     expect(() => analyze(z, undefined, { dayOffset: '+08:00' })).toThrow(/need --by-day/);
     expect(() => analyze(z, undefined, { shifts: 'Day=07:00', to: '2028-01-01T00:00:00Z' })).toThrow(/at most 400 days/);
+  });
+});
+
+describe('analyze: changeover states', () => {
+  const ex = () => [parseStates(readFileSync(statesExample, 'utf8')), parseCounts(readFileSync(countsExample, 'utf8'))] as const;
+  it('example with SETUP as changeover: same availability and OEE, setup moved out of downtime, stops and Pareto', () => {
+    const [st, ct] = ex();
+    const r = analyze(st, ct, { idealCycleS: { M1: 30, M2: 45 }, changeoverStates: ['setup'] });
+    const [m1, m2] = r.machines;
+    expect(m1).toMatchObject({ downS: 48 * 60, changeoverS: 1800, changeovers: 1, stops: 2, plannedProductionS: 705 * 60 });
+    expect(m1).toMatchObject({ availabilityPct: 88.94, performancePct: 87.72, qualityPct: 98, oeePct: 76.45, noDataS: 0 });
+    expect(m2).toMatchObject({ downS: 66 * 60, changeoverS: 0, changeovers: 0, stops: 3, oeePct: 82.02 });
+    expect(r.total).toMatchObject({ downS: 114 * 60, changeoverS: 1800, changeovers: 1, stops: 5, shortStops: 3, oeePct: 79.08 });
+    expect(r.states).toEqual({ run: ['RUN'], planned: ['BREAK'], down: ['DOWN'], changeover: ['SETUP'] });
+    expect(r.pareto.map((e) => [e.reason, e.sharePct])).toEqual([
+      ['spindle alarm', 52.63],
+      ['material shortage', 39.47],
+      ['jam', 7.89],
+    ]);
+    expect(r.changeoverReasons).toEqual([{ reason: 'changeover', stops: 1, seconds: 1800, sharePct: 100, cumulativePct: 100, machines: ['M1'] }]);
+    expect(r.settings.changeoverStates).toEqual(['setup']);
+  });
+
+  it('a short changeover is not a short stop; by reason, falling back to the state', () => {
+    const s = states('2026-01-01 08:00,A,RUN,\n2026-01-01 09:00,A,CHANGEOVER,\n2026-01-01 09:02,A,RUN,\n2026-01-01 10:00,A,setup,die B\n2026-01-01 10:30,A,RUN,\n2026-01-01 11:00,A,RUN,\n');
+    const r = analyze(s, undefined, { changeoverStates: ['changeover', 'Setup'] });
+    expect(r.machines[0]).toMatchObject({ runS: 8880, downS: 0, changeoverS: 1920, changeovers: 2, stops: 0, shortStops: 0, availabilityPct: 82.22 });
+    expect(r.pareto).toEqual([]);
+    expect(r.changeoverReasons?.map((e) => [e.reason, e.stops, e.seconds])).toEqual([
+      ['die B', 1, 1800],
+      ['CHANGEOVER', 1, 120],
+    ]);
+  });
+
+  it('day and shift tables carry changeover and still add up', () => {
+    const s = states('2026-01-01 22:00,A,RUN,\n2026-01-01 23:30,A,SETUP,x\n2026-01-02 00:30,A,RUN,\n2026-01-02 02:00,A,RUN,\n');
+    const r = analyze(s, undefined, { changeoverStates: ['setup'], byDay: true, shifts: 'D=08:00,N=20:00' });
+    expect(r.days?.map((d) => [d.day, d.total.changeoverS, d.total.changeovers])).toEqual([
+      ['2026-01-01', 1800, 1],
+      ['2026-01-02', 1800, 1],
+    ]);
+    expect(r.shifts?.map((x) => [x.shift, x.total.changeoverS])).toEqual([['N', 3600]]);
+    expect(r.total).toMatchObject({ changeoverS: 3600, changeovers: 1 });
+  });
+
+  it('a state cannot be both changeover and run / planned', () => {
+    expect(() => resolveSettings({ changeoverStates: ['run'] })).toThrow(/"run" is both a changeover state and a run state/);
+    expect(() => resolveSettings({ changeoverStates: ['Break'] })).toThrow(/"break" is both a changeover state and a planned-stop state/);
   });
 });

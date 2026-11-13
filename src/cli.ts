@@ -20,7 +20,7 @@ and reject are there). Each row is the parts made since the previous count (an i
 running-counter reading (parts so far; the first reading per machine is the starting point, a reading that goes
 down is a counter reset and counts as the parts made since the reset).
 
-  availability = run time / planned production time (run + downtime; planned stops and no-data time left out)
+  availability = run time / planned production time (run + downtime + changeover; planned stops and no-data time left out)
   performance  = ideal cycle time x total parts / run time
   quality      = good parts / total parts
   OEE          = availability x performance x quality = ideal cycle time x good parts / planned production time
@@ -31,6 +31,8 @@ Options:
   --ideal-cycle <s|M=s,...>  ideal cycle time in seconds per part, one value or per machine (M1=12,M2=15)
   --run-states <a,b>         states that count as running (default run,running,production)
   --planned-states <a,b>     planned stops, not in planned production time (default planned,break,off,no_order,holiday)
+  --changeover-states <a,b>  changeover / setup states (default none): availability loss like downtime, but shown
+                             apart (own column, own by-reason table) and not counted as stops or short stops
                              any other state is unplanned downtime; state names are matched without case
   --from <time>              window start (default the first state row)
   --to <time>                window end (default the latest timestamp in the input)
@@ -112,6 +114,7 @@ export function main(argv: string[]): number {
         'ideal-cycle': { type: 'string' },
         'run-states': { type: 'string' },
         'planned-states': { type: 'string' },
+        'changeover-states': { type: 'string' },
         from: { type: 'string' },
         to: { type: 'string' },
         'short-stop': { type: 'string' },
@@ -168,6 +171,7 @@ export function main(argv: string[]): number {
     const report = analyze(states, counts, {
       runStates: list(values['run-states']),
       plannedStates: list(values['planned-states']),
+      changeoverStates: list(values['changeover-states']),
       idealCycleS: idealCycle(values['ideal-cycle']),
       from: values.from,
       to: values.to,
