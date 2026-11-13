@@ -85,8 +85,24 @@ but one machine cannot have two rows at the same time.
 
 **Counts** (`counts.csv`, optional): header `timestamp,machine,total,good` (or `reject` instead of `good`; `total`
 may be left out when both `good` and `reject` are there). Each row is the number of parts made since the previous
-count: an increment, not a running counter. Counts stamped from the window start up to and including its end are
-used, so an hourly total stamped at the end of the hour is kept.
+count: an increment. Counts stamped from the window start up to and including its end are used, so an hourly total
+stamped at the end of the hour is kept.
+
+**Running counters** (`--counter`): when the counts file holds counter readings (parts so far, as a PLC or MES
+counter shows them) instead of increments. Per machine, in time order (the file need not be sorted):
+
+- the first reading is the starting point and gives no parts itself (put a reading at the shift or window start);
+- each later reading gives the difference to the reading before, stamped at the later reading;
+- a reading where total, good or reject went down is a **counter reset**: the counter restarted from zero, so that
+  reading itself is the parts made since the reset. Parts made between the reading before and the reset are not
+  seen. Every reset is listed in the report notes (first five in text/Markdown, all in JSON `counts.counter.resets`);
+- the same reading twice at one time is left out; two different readings at one time are an input error (exit 2).
+
+```sh
+oee-log-check examples/states-example.csv --counts examples/counter-example.csv --counter --ideal-cycle M1=30,M2=45
+```
+
+gives the same OEE as the increments example.
 
 Column names are matched without case and can be renamed (`--time-column`, `--machine-column`, `--state-column`,
 `--reason-column`, `--counts-time-column`, `--counts-machine-column`, `--total-column`, `--good-column`,
@@ -130,7 +146,8 @@ CI runs the same on Node 20 and 22. The smoke test also runs 20 machines x 90 da
 
 ## Not yet
 
-Running-counter input with resets, changeover as its own class, per-shift-per-day tables.
+Changeover as its own class, per-shift-per-day tables. Counter rollover at a fixed maximum (e.g. 65535) is
+treated as a reset, not as a wrap.
 Presets for specific MES / SCADA export layouts need real sample files.
 
 ## License

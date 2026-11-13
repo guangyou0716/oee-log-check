@@ -16,7 +16,9 @@ states.csv: header "timestamp,machine,state,reason" (machine and reason optional
 lasts until the same machine's next row; the last row lasts until --to, or else the latest timestamp in the input.
 Rows need not be sorted. Timestamps ISO 8601 (2026-11-12 14:05:00 or 2026-11-12T14:05:00+08:00).
 counts.csv: header "timestamp,machine,total,good" (or reject instead of good; total may be left out when both good
-and reject are there). Each row is the parts made since the previous count (an increment, not a running counter).
+and reject are there). Each row is the parts made since the previous count (an increment), or with --counter a
+running-counter reading (parts so far; the first reading per machine is the starting point, a reading that goes
+down is a counter reset and counts as the parts made since the reset).
 
   availability = run time / planned production time (run + downtime; planned stops and no-data time left out)
   performance  = ideal cycle time x total parts / run time
@@ -25,6 +27,7 @@ and reject are there). Each row is the parts made since the previous count (an i
 
 Options:
   --counts <file>            part-count CSV
+  --counter                  counts rows are running-counter readings, not increments (resets handled, listed)
   --ideal-cycle <s|M=s,...>  ideal cycle time in seconds per part, one value or per machine (M1=12,M2=15)
   --run-states <a,b>         states that count as running (default run,running,production)
   --planned-states <a,b>     planned stops, not in planned production time (default planned,break,off,no_order,holiday)
@@ -105,6 +108,7 @@ export function main(argv: string[]): number {
       allowPositionals: true,
       options: {
         counts: { type: 'string' },
+        counter: { type: 'boolean', default: false },
         'ideal-cycle': { type: 'string' },
         'run-states': { type: 'string' },
         'planned-states': { type: 'string' },
@@ -141,8 +145,8 @@ export function main(argv: string[]): number {
       throw new InputError('Use either --json or --md, not both.');
     }
     const countFlags = ['counts-time-column', 'counts-machine-column', 'total-column', 'good-column', 'reject-column'] as const;
-    if (values.counts === undefined && countFlags.some((f) => values[f] !== undefined)) {
-      throw new InputError('Counts column options need --counts.');
+    if (values.counts === undefined && (countFlags.some((f) => values[f] !== undefined) || values.counter)) {
+      throw new InputError('Counts options (columns, --counter) need --counts.');
     }
     const states = parseStates(read(positionals[0], 'states'), {
       timeColumn: values['time-column'],
@@ -159,6 +163,7 @@ export function main(argv: string[]): number {
             totalColumn: values['total-column'],
             goodColumn: values['good-column'],
             rejectColumn: values['reject-column'],
+            counter: values.counter,
           });
     const report = analyze(states, counts, {
       runStates: list(values['run-states']),

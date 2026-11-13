@@ -80,6 +80,27 @@ if (byShift.status !== 0 || sd.shifts?.length !== 3 || Math.abs(sumShifts((x) =>
 }
 console.log(`smoke: ok --shifts on the big log: 3 shifts (90/90/91 periods) add up to the window in ${Date.now() - startedShifts} ms`);
 
+// Same counts as running counters that reset every midnight: a starting reading of 0 at the start, then parts so far
+// today. The 00:00 reading closes the day before (2400); the 01:00 reading (100) is a reset. Totals must match.
+const k = ['timestamp,machine,total,good'];
+for (let m = 1; m <= 20; m++) {
+  k.push(`${new Date(base).toISOString().slice(0, 19).replace('T', ' ')},M${m},0,0`);
+  for (let h = 1; h <= hours; h++) {
+    const today = ((h - 1) % 24) + 1;
+    k.push(`${new Date(base + h * 3_600_000).toISOString().slice(0, 19).replace('T', ' ')},M${m},${today * 100},${today * 99}`);
+  }
+}
+const bigK = join(dir, 'counter.csv');
+writeFileSync(bigK, `${k.join('\n')}\n`);
+const startedCounter = Date.now();
+const counter = run(cli, [bigS, '--counts', bigK, '--counter', '--ideal-cycle', '30', '--json']);
+const kd = counter.stdout ? JSON.parse(counter.stdout) : {};
+if (counter.status !== 0 || kd.total?.totalParts !== t.totalParts || kd.total?.goodParts !== t.goodParts || kd.total?.oeePct !== t.oeePct ||
+  kd.counts?.counter?.resets?.length !== 20 * 89 || kd.counts?.counter?.baselines !== 20) {
+  fail(`big log --counter: status ${counter.status} ${JSON.stringify(kd.total)} resets ${kd.counts?.counter?.resets?.length} ${counter.stderr}`);
+}
+console.log(`smoke: ok --counter on the big log (${k.length - 1} readings, ${20 * 89} daily resets) gives the same OEE in ${Date.now() - startedCounter} ms`);
+
 const bad = run(cli, [states, '--json', '--md']);
 if (bad.status !== 2 || !bad.stderr.includes('either --json or --md')) {
   fail(`bad flags: status ${bad.status} ${bad.stderr}`);

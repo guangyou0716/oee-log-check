@@ -1,5 +1,5 @@
 import { InputError } from './errors.js';
-import type { CountLog, StateLog, StateRow } from './input.js';
+import type { CounterInfo, CountLog, StateLog, StateRow } from './input.js';
 import { parseTimestamp } from './time.js';
 
 export type StateClass = 'run' | 'planned' | 'down';
@@ -112,7 +112,7 @@ export interface Report {
   /** With shifts: the offset used for shift boundaries (null for files without offsets). */
   shiftOffset?: string | null;
   pareto: ParetoRow[];
-  counts: { given: boolean; rows: number; outsideWindow: number; unknownMachine: number };
+  counts: { given: boolean; rows: number; outsideWindow: number; unknownMachine: number; counter?: CounterInfo };
   findings: Finding[];
 }
 
@@ -660,7 +660,13 @@ export function analyze(states: StateLog, counts: CountLog | undefined, s: Setti
     ...(days ? { days, dayStart } : {}),
     ...(shiftTables ? { shifts: shiftTables, shiftOffset: offsetText } : {}),
     pareto: paretoRows,
-    counts: { given: counts !== undefined, rows: countRows.length, outsideWindow, unknownMachine },
+    counts: {
+      given: counts !== undefined,
+      rows: countRows.length,
+      outsideWindow,
+      unknownMachine,
+      ...(counts?.counter ? { counter: counts.counter } : {}),
+    },
     findings,
   };
 }

@@ -105,6 +105,21 @@ function notes(r: Report): string[] {
   if (!r.counts.given) out.push('No counts file: availability only (give --counts and --ideal-cycle for performance, quality and OEE).');
   else if (r.machines.some((m) => m.idealCycleS === null)) out.push('No ideal cycle time for some machines: performance and OEE left out for them (--ideal-cycle).');
   if (r.counts.outsideWindow) out.push(`${r.counts.outsideWindow} count row(s) outside the window left out.`);
+  const c = r.counts.counter;
+  if (c) {
+    out.push(
+      `Running counters: ${c.readings} reading(s) -> ${r.counts.rows} increment(s); the first reading per machine (${c.baselines}) is the starting point` +
+        (c.repeats ? `; ${c.repeats} repeated reading(s) left out` : '') +
+        '.',
+    );
+    if (c.resets.length) {
+      const shown = c.resets.slice(0, 5).map((x) => `${x.machine} at ${x.text} (row ${x.line})`);
+      const more = c.resets.length > shown.length ? `, and ${c.resets.length - shown.length} more` : '';
+      out.push(
+        `${c.resets.length} counter reset(s) (a reading went down; taken as parts since the reset, parts between the reading before and the reset are not seen): ${shown.join(', ')}${more}.`,
+      );
+    }
+  }
   return out;
 }
 

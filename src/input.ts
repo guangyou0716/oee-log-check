@@ -36,10 +36,31 @@ export interface StateLog {
   zoned: boolean;
 }
 
+/** A running-counter reading that went down (reject counter included): the counter was reset. */
+export interface CounterReset {
+  machine: string;
+  /** Timestamp of the reading after the reset, as written. */
+  text: string;
+  line: number;
+}
+
+/** How running-counter readings were turned into increments (only with the counter option). */
+export interface CounterInfo {
+  /** Readings in the file. */
+  readings: number;
+  /** First reading per machine: the starting point, gives no parts itself. */
+  baselines: number;
+  /** Repeated readings (same machine, same time, same values) left out. */
+  repeats: number;
+  resets: CounterReset[];
+}
+
 export interface CountLog {
+  /** Increments (with the counter option: worked out from the readings, stamped at the later reading). */
   rows: CountRow[];
   hasMachine: boolean;
   zoned: boolean | undefined;
+  counter?: CounterInfo;
 }
 
 export interface StateOptions {
@@ -55,6 +76,8 @@ export interface CountOptions {
   totalColumn?: string;
   goodColumn?: string;
   rejectColumn?: string;
+  /** Rows are running-counter readings (totals so far), not increments; resets are found and handled. */
+  counter?: boolean;
 }
 
 function header(rows: string[][], what: string): Map<string, number> {
@@ -182,5 +205,54 @@ export function parseCounts(text: string, options: CountOptions = {}): CountLog 
     const text = cell(row, ti);
     out.push({ machine, time: timestamp(text, what, line, zoned), text, total, good: good ?? total - (reject as number), line });
   }
-  return { rows: out, hasMachine: mi !== undefined, zoned: zoned.value };
+  const base = { hasMachine: mi !== undefined, zoned: zoned.value };
+  if (!options.counter) {
+    return { rows: out, ...base };
+  }
+  const { rows: increments, counter } = counterIncrements(out);
+  return { rows: increments, ...base, counter };
+}
+
+/**
+ * Turns running-counter readings into increments, per machine in time order (file order is not needed).
+ * The first reading of a machine is its starting point. A reading where total, good or reject went down is a reset:
+ * the counter restarted from zero, so that reading itself is the parts made since the reset (parts between the
+ * previous reading and the reset are not seen). Two readings of one machine at the same time must be equal.
+ */
+export function counterIncrements(readings: CountRow[]): { rows: CountRow[]; counter: CounterInfo } {
+  const byMachine = new Map<string, CountRow[]>();
+  for (const r of readings) {
+    const list = byMachine.get(r.machine);
+    if (list) list.push(r);
+    else byMachine.set(r.machine, [r]);
+  }
+  const rows: CountRow[] = [];
+  const counter: CounterInfo = { readings: readings.length, baselines: 0, repeats: 0, resets: [] };
+  for (const list of byMachine.values()) {
+    list.sort((a, b) => a.time - b.time || a.line - b.line);
+    counter.baselines++;
+    for (let i = 1; i < list.length; i++) {
+      const prev = list[i - 1];
+      const cur = list[i];
+      if (cur.time === prev.time) {
+        if (cur.total !== prev.total || cur.good !== prev.good) {
+          throw new InputError(
+            `Counts row ${cur.line}: machine ${cur.machine} has two different counter readings at ${cur.text} (rows ${prev.line} and ${cur.line}).`,
+          );
+        }
+        counter.repeats++;
+        continue;
+      }
+      const total = cur.total - prev.total;
+      const good = cur.good - prev.good;
+      if (total < 0 || good < 0 || good > total) {
+        counter.resets.push({ machine: cur.machine, text: cur.text, line: cur.line });
+        rows.push({ ...cur });
+      } else {
+        rows.push({ ...cur, total, good });
+      }
+    }
+  }
+  rows.sort((a, b) => a.time - b.time || a.line - b.line);
+  return { rows, counter };
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { InputError } from '../src/errors.js';
-import { parseCounts, parseStates, SINGLE_MACHINE } from '../src/input.js';
+import { counterIncrements, parseCounts, parseStates, SINGLE_MACHINE } from '../src/input.js';
 import { formatDuration, parseTimestamp } from '../src/time.js';
 
 describe('parseTimestamp / formatDuration', () => {
@@ -73,5 +73,47 @@ describe('parseCounts', () => {
     for (const [text, re] of bad) {
       expect(() => parseCounts(text)).toThrow(re);
     }
+  });
+});
+
+describe('parseCounts with counter (running-counter readings)', () => {
+  const opt = { counter: true };
+  it('first reading per machine is the starting point; later readings give the difference; file order not needed', () => {
+    const log = parseCounts(
+      'timestamp,machine,total,good\n2026-01-01 10:00,M1,25,22\n2026-01-01 08:00,M1,100,95\n2026-01-01 09:00,M2,7,7\n2026-01-01 09:00,M1,110,104\n',
+      opt,
+    );
+    // M1: 08:00 100/95 (start) -> 09:00 110/104 -> 10:00 25/22 (went down: reset). M2: only a starting point.
+    expect(log.rows.map((r) => [r.machine, r.text, r.total, r.good, r.line])).toEqual([
+      ['M1', '2026-01-01 09:00', 10, 9, 5],
+      ['M1', '2026-01-01 10:00', 25, 22, 2],
+    ]);
+    expect(log.counter).toEqual({ readings: 4, baselines: 2, repeats: 0, resets: [{ machine: 'M1', text: '2026-01-01 10:00', line: 2 }] });
+  });
+  it('a reject counter that goes down is a reset too (good grows faster than total)', () => {
+    const log = parseCounts('timestamp,total,reject\n2026-01-01 08:00,100,10\n2026-01-01 09:00,105,1\n2026-01-01 10:00,115,1\n', opt);
+    expect(log.rows.map((r) => [r.total, r.good])).toEqual([
+      [105, 104],
+      [10, 10],
+    ]);
+    expect(log.counter?.resets.map((r) => r.line)).toEqual([3]);
+  });
+  it('a counter that stays the same gives a zero increment, not a reset', () => {
+    const log = parseCounts('timestamp,total,good\n2026-01-01 08:00,5,5\n2026-01-01 09:00,5,5\n', opt);
+    expect(log.rows.map((r) => [r.total, r.good])).toEqual([[0, 0]]);
+    expect(log.counter?.resets).toEqual([]);
+  });
+  it('repeated equal readings at one time are left out; different ones are an input error', () => {
+    const log = parseCounts('timestamp,total,good\n2026-01-01 08:00,5,5\n2026-01-01 08:00,5,5\n2026-01-01 09:00,9,8\n', opt);
+    expect(log.rows.map((r) => [r.total, r.good])).toEqual([[4, 3]]);
+    expect(log.counter?.repeats).toBe(1);
+    expect(() => parseCounts('timestamp,machine,total,good\n2026-01-01 08:00,M1,5,5\n2026-01-01 08:00,M1,6,5\n', opt)).toThrow(
+      /row 3: machine M1 has two different counter readings at 2026-01-01 08:00 \(rows 2 and 3\)/,
+    );
+  });
+  it('without the option rows stay increments; empty file gives no rows', () => {
+    expect(parseCounts('timestamp,total,good\n2026-01-01 08:00,5,5\n').counter).toBeUndefined();
+    expect(parseCounts('timestamp,total,good\n', opt).rows).toEqual([]);
+    expect(counterIncrements([]).counter).toEqual({ readings: 0, baselines: 0, repeats: 0, resets: [] });
   });
 });

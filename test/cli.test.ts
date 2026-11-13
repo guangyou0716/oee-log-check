@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
-import { countsExample, statesExample } from './helpers.js';
+import { counterExample, countsExample, statesExample } from './helpers.js';
 
 let out = '';
 let err = '';
@@ -141,4 +141,28 @@ describe('cli: --shifts', () => {
     expect(main([...full, '--shifts', 'A'])).toBe(2);
     expect(err).toContain('is not name=HH:MM');
   });
+
+  it('--counter: the running-counter example gives the same OEE as the increments example', () => {
+    expect(main([statesExample, '--counts', counterExample, '--counter', '--ideal-cycle', 'M1=30,M2=45', '--json'])).toBe(0);
+    const r = JSON.parse(out);
+    expect(r.machines[0].oeePct).toBe(76.45);
+    expect(r.total.oeePct).toBe(79.08);
+    expect(r.total.totalParts).toBe(1800);
+    expect(r.counts.counter).toMatchObject({ baselines: 2, repeats: 0, resets: [] });
+    out = '';
+    expect(main([statesExample, '--counts', counterExample, '--counter', '--ideal-cycle', 'M1=30,M2=45'])).toBe(0);
+    expect(out).toMatch(/Note: Running counters: \d+ reading\(s\) -> \d+ increment\(s\); the first reading per machine \(2\) is the starting point\./);
+  });
+  it('--counter lists resets in the notes (text and md)', () => {
+    const states = tmp('s.csv', 'timestamp,state\n2026-01-01 08:00,run\n2026-01-01 10:00,run\n');
+    const counts = tmp('c.csv', 'timestamp,total,good\n2026-01-01 08:00,500,490\n2026-01-01 09:00,560,549\n2026-01-01 10:00,40,40\n');
+    expect(main([states, '--counts', counts, '--counter', '--ideal-cycle', '60', '--md'])).toBe(0);
+    expect(out).toContain('> 1 counter reset(s) (a reading went down; taken as parts since the reset, parts between the reading before and the reset are not seen): machine at 2026-01-01 10:00 (row 4).');
+    expect(out).toMatch(/\| machine \| .*\| 100 \(99 good\) \|/);
+  });
+  it('--counter needs --counts', () => {
+    expect(main([statesExample, '--counter'])).toBe(2);
+    expect(err).toContain('need --counts');
+  });
 });
+
