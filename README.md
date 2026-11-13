@@ -20,6 +20,7 @@ node dist/cli.js examples/states-example.csv                                    
 node dist/cli.js examples/states-example.csv --counts examples/counts-example.csv --ideal-cycle M1=30,M2=45
 node dist/cli.js examples/states-example.csv --counts examples/counts-example.csv --ideal-cycle 30 --target 80 --md
 node dist/cli.js line.csv --counts parts.csv --ideal-cycle 12 --from "2026-11-02 08:00" --to "2026-11-02 20:00" --json
+node dist/cli.js line.csv --counts parts.csv --ideal-cycle 12 --by-day --day-start 07:00   # one row per day and machine
 ```
 
 `examples/` holds **example data** (made up for this README): two machines over one 12-hour shift, with a break, a
@@ -48,6 +49,18 @@ Findings: none
 
 Checked by hand: M1 runs 627 of 705 planned-production minutes (A = 88.94%), makes 1,100 parts at an ideal 30 s
 (P = 33,000 s / 37,620 s = 87.72%) with 1,078 good (Q = 98%), so OEE = 30 s x 1,078 / 42,300 s = 76.45%.
+
+### Per day (`--by-day`)
+
+`--by-day` adds a table per day (per machine and `All`) with the same columns, and `days` in `--json`. A day starts
+at `--day-start` (default 00:00; use 07:00 when the first shift starts at 7) and is labelled with the date it starts
+on. The first and last day are cut to the window. Days add up to the window: a stop that runs across a day start is
+split and counts as a stop in both days, and a count stamped exactly on a day start closes the day before. For files
+whose timestamps carry an offset, day boundaries use the first state row's offset unless `--day-offset +08:00` is
+given. Day tables raise no findings of their own; at most 400 days per run.
+
+On the example with `--by-day --day-start 14:00`, M1 has 5 h 45 min + 6 h 0 min of planned production and 552 + 548
+parts, which add up to the 11 h 45 min and 1,100 parts above.
 
 ### Input
 
@@ -103,7 +116,7 @@ CI runs the same on Node 20 and 22. The smoke test also runs 20 machines x 90 da
 
 ## Not yet
 
-Shift calendar and per-shift / per-day tables, running-counter input with resets, changeover as its own class.
+Shift calendar and per-shift tables, running-counter input with resets, changeover as its own class.
 Presets for specific MES / SCADA export layouts need real sample files.
 
 ## License

@@ -33,6 +33,9 @@ Options:
   --to <time>                window end (default the latest timestamp in the input)
   --short-stop <s>           stops shorter than this are counted as short stops (default 300)
   --target <pct>             OEE target: machines (and the total) below it are findings
+  --by-day                   also a table per day (and per machine): times, availability, performance, quality, OEE
+  --day-start <HH:MM>        time of day a day starts for --by-day (default 00:00; e.g. 07:00 for a 7am first shift)
+  --day-offset <+HH:MM>      zone offset for day boundaries when the files carry offsets (default the first row's)
   --time-column <name>       states timestamp column (default timestamp)
   --machine-column <name>    states machine column (default machine, optional)
   --state-column <name>      states state column (default state)
@@ -107,6 +110,9 @@ export function main(argv: string[]): number {
         to: { type: 'string' },
         'short-stop': { type: 'string' },
         target: { type: 'string' },
+        'by-day': { type: 'boolean', default: false },
+        'day-start': { type: 'string' },
+        'day-offset': { type: 'string' },
         'time-column': { type: 'string' },
         'machine-column': { type: 'string' },
         'state-column': { type: 'string' },
@@ -159,6 +165,9 @@ export function main(argv: string[]): number {
       to: values.to,
       shortStopS: number(values['short-stop'], '--short-stop'),
       targetPct: number(values.target, '--target'),
+      byDay: values['by-day'],
+      dayStart: values['day-start'],
+      dayOffset: values['day-offset'],
     });
     process.stdout.write(values.json ? jsonReport(report) : values.md ? markdownReport(report) : textReport(report));
     return report.findings.length ? 1 : 0;

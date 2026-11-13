@@ -109,3 +109,18 @@ describe('cli', () => {
     expect(out).toContain('Usage: oee-log-check');
   });
 });
+
+describe('cli: --by-day', () => {
+  it('text and markdown show the day table; day options need --by-day', () => {
+    expect(main([...full, '--by-day', '--day-start', '14:00'])).toBe(0);
+    expect(out).toContain('By day (a day starts at 14:00;');
+    expect(out).toMatch(/2026-11-01 All\s+10 h 15 min/);
+    expect(out).toMatch(/2026-11-02 M1\s+6 h 0 min/);
+    out = '';
+    expect(main([...full, '--by-day', '--md'])).toBe(0);
+    expect(out).toContain('## By day');
+    expect(out).toContain('| 2026-11-02 All |');
+    expect(main([...full, '--day-start', '07:00'])).toBe(2);
+    expect(err).toContain('need --by-day');
+  });
+});

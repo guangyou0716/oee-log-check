@@ -59,6 +59,16 @@ if (res.status !== 0 || data.machines?.length !== 20 || t.runS !== 20 * hours * 
 }
 console.log(`smoke: ok 20 machines x 90 days (${s.length - 1} state rows, ${c.length - 1} count rows) in ${Date.now() - started} ms, OEE 82.5%`);
 
+const startedDays = Date.now();
+const byDay = run(cli, [bigS, '--counts', bigC, '--ideal-cycle', '30', '--json', '--by-day']);
+const dd = byDay.stdout ? JSON.parse(byDay.stdout) : {};
+const sumDays = (f) => (dd.days ?? []).reduce((a, d) => a + f(d.total), 0);
+if (byDay.status !== 0 || dd.days?.length !== 90 || Math.abs(sumDays((x) => x.runS) - t.runS) > 0.01 ||
+  sumDays((x) => x.totalParts) !== t.totalParts || dd.days[0].machines.length !== 20) {
+  fail(`big log --by-day: status ${byDay.status} days ${dd.days?.length} ${byDay.stderr}`);
+}
+console.log(`smoke: ok --by-day on the big log: 90 days add up to the window in ${Date.now() - startedDays} ms`);
+
 const bad = run(cli, [states, '--json', '--md']);
 if (bad.status !== 2 || !bad.stderr.includes('either --json or --md')) {
   fail(`bad flags: status ${bad.status} ${bad.stderr}`);

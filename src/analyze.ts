@@ -18,6 +18,12 @@ export interface Settings {
   shortStopS?: number;
   /** OEE target in percent: machines (and the total) below it are findings. */
   targetPct?: number;
+  /** Also split the window into days (report.days). */
+  byDay?: boolean;
+  /** Time of day a day starts, HH:MM (default 00:00), e.g. 07:00 when the first shift starts at 7. */
+  dayStart?: string;
+  /** Zone offset for day boundaries when the files carry offsets (default: the first state row's offset). */
+  dayOffset?: string;
 }
 
 export interface ResolvedSettings {
@@ -49,6 +55,18 @@ export interface MachineStats {
   oeePct: number | null;
 }
 
+export type TotalStats = Omit<MachineStats, 'machine' | 'idealCycleS'>;
+
+export interface DayStats {
+  /** Date the day starts on (YYYY-MM-DD, wall clock). */
+  day: string;
+  from: string;
+  to: string;
+  seconds: number;
+  machines: MachineStats[];
+  total: TotalStats;
+}
+
 export interface ParetoRow {
   reason: string;
   stops: number;
@@ -70,7 +88,11 @@ export interface Report {
   /** Distinct state names seen, by class (as written, first spelling kept). */
   states: Record<StateClass, string[]>;
   machines: MachineStats[];
-  total: Omit<MachineStats, 'machine' | 'idealCycleS'>;
+  total: TotalStats;
+  /** Per day, only with byDay. Day tables raise no findings of their own. */
+  days?: DayStats[];
+  /** With byDay: day start time and the offset used for day boundaries (null for files without offsets). */
+  dayStart?: { time: string; offset: string | null };
   pareto: ParetoRow[];
   counts: { given: boolean; rows: number; outsideWindow: number; unknownMachine: number };
   findings: Finding[];
@@ -112,6 +134,151 @@ export function resolveSettings(s: Settings): ResolvedSettings {
     throw new InputError('--target must be above 0 and at most 100 (percent).');
   }
   return { runStates, plannedStates, shortStopS, targetPct: s.targetPct ?? null };
+}
+
+
+interface Walk {
+  ms: Record<StateClass, number>;
+  stops: number;
+  shortStops: number;
+  shortMs: number;
+}
+
+/** Index of the last row starting at or before t (0 when every row starts later); rows are sorted by time. */
+function firstIndex(list: StateRow[], t: number): number {
+  let lo = 0;
+  let hi = list.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (list[mid].time <= t) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/** Adds up one machine's state time inside [from, to); each state lasts until the next row. */
+function walk(
+  list: StateRow[],
+  from: number,
+  to: number,
+  classOf: (state: string) => StateClass,
+  shortStopS: number,
+  onSegment?: (row: StateRow, cls: StateClass, ms: number) => void,
+): Walk {
+  const ms: Record<StateClass, number> = { run: 0, planned: 0, down: 0 };
+  let stops = 0;
+  let shortStops = 0;
+  let shortMs = 0;
+  for (let i = firstIndex(list, from); i < list.length && list[i].time < to; i++) {
+    const row = list[i];
+    const start = Math.max(row.time, from);
+    const end = Math.min(i + 1 < list.length ? list[i + 1].time : to, to);
+    if (end <= start) continue;
+    const cls = classOf(row.state);
+    ms[cls] += end - start;
+    if (cls === 'down') {
+      stops++;
+      if ((end - start) / 1000 < shortStopS) {
+        shortStops++;
+        shortMs += end - start;
+      }
+    }
+    onSegment?.(row, cls, end - start);
+  }
+  return { ms, stops, shortStops, shortMs };
+}
+
+function machineStats(
+  machine: string,
+  w: Walk,
+  windowMs: number,
+  p: { total: number; good: number },
+  cycle: number | null,
+  countsGiven: boolean,
+): MachineStats {
+  const { ms } = w;
+  const noDataMs = windowMs - ms.run - ms.planned - ms.down;
+  const prod = ms.run + ms.down;
+  const availabilityPct = pct(ms.run, prod);
+  const performancePct = countsGiven && cycle !== null && ms.run > 0 ? pct(cycle * p.total * 1000, ms.run) : null;
+  const qualityPct = countsGiven ? pct(p.good, p.total) : null;
+  // OEE = A x P x Q = ideal cycle x good parts / planned production time (from unrounded values).
+  const oeePct =
+    availabilityPct !== null && performancePct !== null && qualityPct !== null && cycle !== null ? pct(cycle * p.good * 1000, prod) : null;
+  return {
+    machine,
+    plannedProductionS: sec(prod),
+    runS: sec(ms.run),
+    downS: sec(ms.down),
+    plannedStopS: sec(ms.planned),
+    noDataS: sec(noDataMs),
+    stops: w.stops,
+    shortStops: w.shortStops,
+    shortStopS: sec(w.shortMs),
+    idealCycleS: cycle,
+    totalParts: p.total,
+    goodParts: p.good,
+    availabilityPct,
+    performancePct,
+    qualityPct,
+    oeePct,
+  };
+}
+
+/** Total: sums of times and parts; performance only when every machine with run time has an ideal cycle. */
+function totalOf(machines: MachineStats[], countsGiven: boolean): TotalStats {
+  const sum = (f: (m: MachineStats) => number) => machines.reduce((t, m) => t + f(m), 0);
+  const runS = sum((m) => m.runS);
+  const prodS = sum((m) => m.plannedProductionS);
+  const totalParts = sum((m) => m.totalParts);
+  const goodParts = sum((m) => m.goodParts);
+  const allIdeal = machines.every((m) => m.idealCycleS !== null || m.runS === 0);
+  const availabilityPct = pct(runS, prodS);
+  const performancePct = countsGiven && allIdeal && runS > 0 ? pct(sum((m) => (m.idealCycleS ?? 0) * m.totalParts), runS) : null;
+  const qualityPct = countsGiven ? pct(goodParts, totalParts) : null;
+  const oeePct =
+    availabilityPct !== null && performancePct !== null && qualityPct !== null
+      ? pct(sum((m) => (m.idealCycleS ?? 0) * m.goodParts), prodS)
+      : null;
+  const round3 = (x: number) => Math.round(x * 1000) / 1000;
+  return {
+    plannedProductionS: round3(prodS),
+    runS: round3(runS),
+    downS: round3(sum((m) => m.downS)),
+    plannedStopS: round3(sum((m) => m.plannedStopS)),
+    noDataS: round3(sum((m) => m.noDataS)),
+    stops: sum((m) => m.stops),
+    shortStops: sum((m) => m.shortStops),
+    shortStopS: round3(sum((m) => m.shortStopS)),
+    totalParts,
+    goodParts,
+    availabilityPct,
+    performancePct,
+    qualityPct,
+    oeePct,
+  };
+}
+
+const DAY_MS = 86_400_000;
+const pad = (n: number, w = 2) => String(n).padStart(w, '0');
+
+/** "+08:00" -> minutes east of UTC. */
+function offsetMinutes(text: string, flag: string): number {
+  const m = /^(Z)$|^([+-])(\d{2}):?(\d{2})$/.exec(text.trim());
+  if (!m || (m[3] !== undefined && (Number(m[3]) > 23 || Number(m[4]) > 59))) {
+    throw new InputError(`${flag} "${text}" is not a zone offset like +08:00.`);
+  }
+  return m[1] ? 0 : (m[2] === '-' ? -1 : 1) * (Number(m[3]) * 60 + Number(m[4]));
+}
+
+/** Wall-clock text for epoch ms shifted by the offset: "2026-11-12 07:00:00" (+ ".250" when there are ms). */
+function wallText(ms: number, offsetMin: number, zoned: boolean): string {
+  const d = new Date(ms + offsetMin * 60_000);
+  const frac = d.getUTCMilliseconds() ? `.${pad(d.getUTCMilliseconds(), 3)}` : '';
+  const base = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}${frac}`;
+  if (!zoned) return base;
+  const a = Math.abs(offsetMin);
+  return `${base}${offsetMin < 0 ? '-' : '+'}${pad(Math.floor(a / 60))}:${pad(a % 60)}`;
 }
 
 /** Works out availability, performance, quality and OEE per machine and in total, plus the downtime Pareto. */
@@ -215,62 +382,25 @@ export function analyze(states: StateLog, counts: CountLog | undefined, s: Setti
 
   for (const machine of machineNames) {
     const list = byMachine.get(machine) as StateRow[];
-    const ms: Record<StateClass, number> = { run: 0, planned: 0, down: 0 };
-    let stops = 0;
-    let shortStops = 0;
-    let shortMs = 0;
-    for (let i = 0; i < list.length; i++) {
-      const row = list[i];
-      const start = Math.max(row.time, from);
-      const end = Math.min(i + 1 < list.length ? list[i + 1].time : to, to);
-      if (end <= start) continue;
-      const cls = classOf(row.state);
+    const w = walk(list, from, to, classOf, settings.shortStopS, (row, cls, len) => {
       const key = row.state.toLowerCase();
       if (!seen[cls].has(key)) seen[cls].set(key, row.state);
-      ms[cls] += end - start;
       if (cls === 'down') {
-        stops++;
-        if ((end - start) / 1000 < settings.shortStopS) {
-          shortStops++;
-          shortMs += end - start;
-        }
         const reason = row.reason || row.state;
         const pk = reason.toLowerCase();
         const entry = pareto.get(pk) ?? { reason, stops: 0, ms: 0, machines: new Set<string>() };
         entry.stops++;
-        entry.ms += end - start;
+        entry.ms += len;
         entry.machines.add(machine);
         pareto.set(pk, entry);
       }
-    }
-    const noDataMs = to - from - ms.run - ms.planned - ms.down;
-    const prod = ms.run + ms.down;
+    });
+    const ms = w.ms;
     const p = parts.get(machine) ?? { total: 0, good: 0, beforeFirst: 0 };
     const cycle = ideal.get(machine) ?? null;
-    const availabilityPct = pct(ms.run, prod);
-    const performancePct = counts && cycle !== null && ms.run > 0 ? pct(cycle * p.total * 1000, ms.run) : null;
-    const qualityPct = counts ? pct(p.good, p.total) : null;
-    // OEE = A x P x Q = ideal cycle x good parts / planned production time (from unrounded values).
-    const oeePct =
-      availabilityPct !== null && performancePct !== null && qualityPct !== null && cycle !== null ? pct(cycle * p.good * 1000, prod) : null;
-    machines.push({
-      machine,
-      plannedProductionS: sec(prod),
-      runS: sec(ms.run),
-      downS: sec(ms.down),
-      plannedStopS: sec(ms.planned),
-      noDataS: sec(noDataMs),
-      stops,
-      shortStops,
-      shortStopS: sec(shortMs),
-      idealCycleS: cycle,
-      totalParts: p.total,
-      goodParts: p.good,
-      availabilityPct,
-      performancePct,
-      qualityPct,
-      oeePct,
-    });
+    const stats = machineStats(machine, w, to - from, p, cycle, counts !== undefined);
+    const { performancePct, oeePct } = stats;
+    machines.push(stats);
     if (p.beforeFirst > 0) {
       findings.push({
         kind: 'counts-before-first-state',
@@ -293,39 +423,76 @@ export function analyze(states: StateLog, counts: CountLog | undefined, s: Setti
     }
   }
 
-  // Total: sums of times and parts; performance only when every machine with run time has an ideal cycle.
-  const sum = (f: (m: MachineStats) => number) => machines.reduce((t, m) => t + f(m), 0);
-  const runS = sum((m) => m.runS);
-  const prodS = sum((m) => m.plannedProductionS);
-  const totalParts = sum((m) => m.totalParts);
-  const goodParts = sum((m) => m.goodParts);
-  const allIdeal = machines.every((m) => m.idealCycleS !== null || m.runS === 0);
-  const availabilityPct = pct(runS, prodS);
-  const performancePct = counts && allIdeal && runS > 0 ? pct(sum((m) => (m.idealCycleS ?? 0) * m.totalParts), runS) : null;
-  const qualityPct = counts ? pct(goodParts, totalParts) : null;
-  const oeePct =
-    availabilityPct !== null && performancePct !== null && qualityPct !== null
-      ? pct(sum((m) => (m.idealCycleS ?? 0) * m.goodParts), prodS)
-      : null;
-  const round3 = (x: number) => Math.round(x * 1000) / 1000;
-  const total = {
-    plannedProductionS: round3(prodS),
-    runS: round3(runS),
-    downS: round3(sum((m) => m.downS)),
-    plannedStopS: round3(sum((m) => m.plannedStopS)),
-    noDataS: round3(sum((m) => m.noDataS)),
-    stops: sum((m) => m.stops),
-    shortStops: sum((m) => m.shortStops),
-    shortStopS: round3(sum((m) => m.shortStopS)),
-    totalParts,
-    goodParts,
-    availabilityPct,
-    performancePct,
-    qualityPct,
-    oeePct,
-  };
+  const total = totalOf(machines, counts !== undefined);
+  const oeePct = total.oeePct;
   if (machines.length > 1 && settings.targetPct !== null && oeePct !== null && oeePct < settings.targetPct) {
     findings.push({ kind: 'below-target', machine: null, message: `All machines: OEE ${oeePct}% is below the ${settings.targetPct}% target.` });
+  }
+
+  // Per-day tables: [from, to) cut at each day start; a count stamped exactly on a day start belongs to the day before
+  // (it closes that day's last interval), so the days add up to the window.
+  let days: DayStats[] | undefined;
+  let dayStart: Report['dayStart'];
+  if (s.byDay) {
+    const dm = /^(\d{1,2}):(\d{2})$/.exec((s.dayStart ?? '00:00').trim());
+    if (!dm || Number(dm[1]) > 23 || Number(dm[2]) > 59) {
+      throw new InputError(`--day-start "${s.dayStart}" is not a time of day like 07:00.`);
+    }
+    const startMin = Number(dm[1]) * 60 + Number(dm[2]);
+    let offsetMin = 0;
+    let offsetText: string | null = null;
+    if (states.zoned) {
+      const own = /(Z|[+-]\d{2}:?\d{2})$/.exec(firstRow.text.trim());
+      offsetText = s.dayOffset ?? (own ? own[1] : 'Z');
+      offsetMin = offsetMinutes(offsetText, '--day-offset');
+    } else if (s.dayOffset !== undefined) {
+      throw new InputError('--day-offset is only for files whose timestamps carry a zone offset.');
+    }
+    // Wall clock is epoch ms + offset; the first day start at or before `from`.
+    const shift = offsetMin * 60_000 - startMin * 60_000;
+    const first = Math.floor((from + shift) / DAY_MS) * DAY_MS - shift;
+    const count = Math.ceil((to - first) / DAY_MS);
+    if (count > 400) {
+      throw new InputError(`--by-day would give ${count} days; narrow the window with --from / --to (at most 400 days).`);
+    }
+    const edges = Array.from({ length: count + 1 }, (_, i) => Math.min(Math.max(first + i * DAY_MS, from), to));
+    const dayParts = Array.from({ length: count }, () => new Map<string, { total: number; good: number }>());
+    for (const c of countRows) {
+      if (c.time < from || c.time > to || !byMachine.has(c.machine)) continue;
+      // Day i holds (edges[i], edges[i + 1]]; a count right on `from` goes to the first day.
+      let i = Math.ceil((c.time - first) / DAY_MS) - 1;
+      if (i < 0) i = 0;
+      const m = dayParts[i].get(c.machine) ?? { total: 0, good: 0 };
+      m.total += c.total;
+      m.good += c.good;
+      dayParts[i].set(c.machine, m);
+    }
+    days = [];
+    for (let i = 0; i < count; i++) {
+      const a = edges[i];
+      const b = edges[i + 1];
+      const dayMachines = machineNames.map((machine) =>
+        machineStats(
+          machine,
+          walk(byMachine.get(machine) as StateRow[], a, b, classOf, settings.shortStopS),
+          b - a,
+          dayParts[i].get(machine) ?? { total: 0, good: 0 },
+          ideal.get(machine) ?? null,
+          counts !== undefined,
+        ),
+      );
+      days.push({
+        day: wallText(first + i * DAY_MS, offsetMin, false).slice(0, 10),
+        from: wallText(a, offsetMin, states.zoned),
+        to: wallText(b, offsetMin, states.zoned),
+        seconds: sec(b - a),
+        machines: dayMachines,
+        total: totalOf(dayMachines, counts !== undefined),
+      });
+    }
+    dayStart = { time: `${pad(Math.floor(startMin / 60))}:${dm[2]}`, offset: offsetText };
+  } else if (s.dayStart !== undefined || s.dayOffset !== undefined) {
+    throw new InputError('--day-start and --day-offset need --by-day.');
   }
 
   const downMs = [...pareto.values()].reduce((t, e) => t + e.ms, 0);
@@ -350,6 +517,7 @@ export function analyze(states: StateLog, counts: CountLog | undefined, s: Setti
     states: { run: [...seen.run.values()], planned: [...seen.planned.values()], down: [...seen.down.values()] },
     machines,
     total,
+    ...(days ? { days, dayStart } : {}),
     pareto: paretoRows,
     counts: { given: counts !== undefined, rows: countRows.length, outsideWindow, unknownMachine },
     findings,
