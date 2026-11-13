@@ -164,5 +164,29 @@ describe('cli: --shifts', () => {
     expect(main([statesExample, '--counter'])).toBe(2);
     expect(err).toContain('need --counts');
   });
+
+  it('--changeover-states adds a column and a by-reason table (text and md); JSON carries the fields', () => {
+    expect(main([...full, '--changeover-states', 'setup'])).toBe(0);
+    expect(out).toContain('States seen: run = RUN; planned stop = BREAK; changeover = SETUP; downtime = DOWN');
+    expect(out).toContain('changeover states: setup; anything else is downtime');
+    expect(out).toMatch(/Machine +Planned prod\. +Run +Down +Stops +Changeover +C\/O +Planned stop/);
+    expect(out).toMatch(/M1 +11 h 45 min +10 h 27 min +48 min +2 +30 min +1 +15 min +0 s +88\.94% +87\.72% +98% +76\.45%/);
+    expect(out).toContain('Changeover by reason (availability loss, not in downtime or stops): 1 changeover(s), 30 min');
+    expect(out).toMatch(/changeover +1 +30 min +100% +100% +M1/);
+    out = '';
+    expect(main([...full, '--changeover-states', 'setup', '--md'])).toBe(0);
+    expect(out).toContain('## Changeover by reason');
+    expect(out).toContain('| Machine | Planned prod. | Run | Down | Stops | Changeover | C/O | Planned stop |');
+    out = '';
+    expect(main([...full, '--changeover-states', 'nothing-like-this', '--json'])).toBe(0);
+    const j = JSON.parse(out);
+    expect(j.changeoverReasons).toEqual([]);
+    expect(j.machines[0]).toMatchObject({ changeoverS: 0, changeovers: 0 });
+    out = '';
+    expect(main([...full, '--changeover-states', 'nothing-like-this'])).toBe(0);
+    expect(out).toContain('Changeover by reason: no changeover in the window.');
+    expect(main([...full, '--changeover-states', 'RUN'])).toBe(2);
+    expect(err).toContain('"run" is both a changeover state and a run state');
+  });
 });
 

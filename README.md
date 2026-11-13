@@ -22,6 +22,7 @@ node dist/cli.js examples/states-example.csv --counts examples/counts-example.cs
 node dist/cli.js line.csv --counts parts.csv --ideal-cycle 12 --from "2026-11-02 08:00" --to "2026-11-02 20:00" --json
 node dist/cli.js line.csv --counts parts.csv --ideal-cycle 12 --by-day --day-start 07:00   # one row per day and machine
 node dist/cli.js line.csv --counts parts.csv --ideal-cycle 12 --shifts A=07:00,B=15:00,C=23:00   # one row per shift and machine
+node dist/cli.js line.csv --counts parts.csv --ideal-cycle 12 --changeover-states setup,changeover   # changeover apart from downtime
 ```
 
 `examples/` holds **example data** (made up for this README): two machines over one 12-hour shift, with a break, a
@@ -76,6 +77,17 @@ is given. `--shifts` works with or without `--by-day`; shift tables raise no fin
 On the example with `--shifts A=06:00,B=14:00,C=22:00`, shift A has the same 5 h 45 min and 552 parts for M1 as
 the first day above, and C is left out (the window ends at 20:00).
 
+### Changeover (`--changeover-states`)
+
+`--changeover-states setup,changeover` puts those states in a class of their own. Changeover time stays inside
+planned production time, so it is still an **availability loss** and availability and OEE do not change; but it is
+taken out of downtime, stops, short stops and the downtime Pareto. The tables get a `Changeover` (time) and `C/O`
+(how many) column, the report adds **Changeover by reason** (state when there is no reason), and `--json` adds
+`changeoverS` / `changeovers` per machine, day and shift plus `changeoverReasons`. No changeover states by default.
+
+On the example with `--changeover-states setup`, M1 has 48 min downtime in 2 stops plus 30 min changeover
+(1 changeover), with the same 88.94% availability and 76.45% OEE; the Pareto is spindle alarm, material shortage, jam.
+
 ### Input
 
 **States** (`states.csv`): header `timestamp,machine,state,reason`; `machine` and `reason` are optional (no
@@ -115,9 +127,10 @@ without a zone offset. Any problem is reported with its row number (exit 2).
 |---|---|
 | run time | time in a run state (`--run-states`, default `run,running,production`) |
 | planned stop | time in a planned-stop state (`--planned-states`, default `planned,break,off,no_order,holiday`) |
+| changeover | time in a changeover state (`--changeover-states`, default none) |
 | downtime | time in **any other state**; every state counted as downtime is listed at the top of the report |
 | no data | time in the window before a machine's first state row |
-| planned production time | run time + downtime |
+| planned production time | run time + downtime + changeover |
 | availability | run time / planned production time |
 | performance | ideal cycle time x total parts / run time (`--ideal-cycle 30` or `--ideal-cycle M1=30,M2=45`) |
 | quality | good parts / total parts |
@@ -125,7 +138,8 @@ without a zone offset. Any problem is reported with its row number (exit 2).
 
 The **All** row sums the times and parts of every machine (performance uses each machine's own ideal cycle time).
 Each downtime row counts as one stop. Short stops (`--short-stop`, default 300 s) stay in downtime and so in availability; they are only counted. Where
-your plant books changeovers or short stops differently, set `--run-states` / `--planned-states` to match.
+your plant books changeovers or short stops differently, set `--run-states` / `--planned-states` /
+`--changeover-states` to match.
 Without `--counts` the report gives availability and the Pareto only; without `--ideal-cycle` it leaves out
 performance and OEE.
 
@@ -146,7 +160,7 @@ CI runs the same on Node 20 and 22. The smoke test also runs 20 machines x 90 da
 
 ## Not yet
 
-Changeover as its own class, per-shift-per-day tables. Counter rollover at a fixed maximum (e.g. 65535) is
+Per-shift-per-day tables. Counter rollover at a fixed maximum (e.g. 65535) is
 treated as a reset, not as a wrap.
 Presets for specific MES / SCADA export layouts need real sample files.
 
