@@ -32,6 +32,28 @@ function rows(r: Report): string[][] {
   return out;
 }
 
+function dayRows(r: Report): string[][] {
+  const out: string[][] = [];
+  for (const d of r.days ?? []) {
+    if (r.machines.length > 1) {
+      for (const m of d.machines) out.push(cells(r, `${d.day} ${m.machine}`, m));
+      out.push(cells(r, `${d.day} All`, d.total));
+    } else {
+      out.push(cells(r, d.day, d.total));
+    }
+  }
+  return out;
+}
+
+function dayHeads(r: Report): string[] {
+  return [r.machines.length > 1 ? 'Day / machine' : 'Day', ...heads(r).slice(1)];
+}
+
+function dayTitle(r: Report): string {
+  const ds = r.dayStart;
+  return `By day (a day starts at ${ds?.time ?? '00:00'}${ds?.offset ? ` ${ds.offset}` : ''}; a stop across a day start counts in both days)`;
+}
+
 function table(head: string[], body: string[][], right: (i: number) => boolean): string[] {
   const widths = head.map((h, i) => Math.max(h.length, ...body.map((b) => b[i].length)));
   const fmt = (cols: string[]) =>
@@ -69,6 +91,11 @@ export function textReport(r: Report): string {
   const lines = [...header(r), ''];
   lines.push(...table(heads(r), rows(r), (i) => i > 0 && i < 11));
   lines.push('');
+  if (r.days) {
+    lines.push(`${dayTitle(r)}:`);
+    lines.push(...table(dayHeads(r), dayRows(r), (i) => i > 0 && i < 11));
+    lines.push('');
+  }
   if (r.pareto.length) {
     lines.push('Downtime by reason (state when there is no reason):');
     lines.push(...table(paretoHeads, paretoCells(r), (i) => i >= 1 && i <= 4));
@@ -92,6 +119,7 @@ const mdTable = (head: string[], body: string[][]) => [md(head), md(head.map(() 
 
 export function markdownReport(r: Report): string {
   const lines = ['# OEE report', '', ...header(r).map((h) => `- ${h.trim()}`), '', '## Machines', '', ...mdTable(heads(r), rows(r)), ''];
+  if (r.days) lines.push('## By day', '', `${dayTitle(r)}.`, '', ...mdTable(dayHeads(r), dayRows(r)), '');
   lines.push('## Downtime by reason', '');
   if (r.pareto.length) {
     lines.push(...mdTable(paretoHeads, paretoCells(r)), '');

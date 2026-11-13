@@ -126,3 +126,58 @@ describe('analyze: rules', () => {
     expect(() => resolveSettings({ shortStopS: -1 })).toThrow(/--short-stop/);
   });
 });
+
+describe('analyze: --by-day', () => {
+  const s = states(
+    '2026-01-01 22:00,A,RUN,\n2026-01-01 23:30,A,DOWN,jam\n2026-01-02 00:30,A,RUN,\n2026-01-02 06:00,A,off,\n2026-01-02 07:00,A,RUN,\n2026-01-02 08:00,A,RUN,\n',
+  );
+  const c = counts('2026-01-01 23:00,A,100,100\n2026-01-02 00:00,A,50,49\n2026-01-02 01:00,A,60,60\n2026-01-02 08:00,A,10,10\n');
+
+  it('days cut at midnight add up to the window; a count on midnight closes the day before', () => {
+    const r = analyze(s, c, { idealCycleS: 30, byDay: true });
+    expect(r.days?.map((d) => [d.day, d.from, d.to, d.seconds])).toEqual([
+      ['2026-01-01', '2026-01-01 22:00:00', '2026-01-02 00:00:00', 7200],
+      ['2026-01-02', '2026-01-02 00:00:00', '2026-01-02 08:00:00', 28800],
+    ]);
+    const [d1, d2] = r.days ?? [];
+    expect(d1.total).toMatchObject({ runS: 5400, downS: 1800, stops: 1, totalParts: 150, goodParts: 149, availabilityPct: 75 });
+    // The jam from 23:30 to 00:30 crosses midnight: it counts as a stop in both days.
+    expect(d2.total).toMatchObject({ runS: 6.5 * 3600, downS: 1800, plannedStopS: 3600, stops: 1, totalParts: 70 });
+    expect(d1.total.runS + d2.total.runS).toBe(r.total.runS);
+    expect(d1.total.totalParts + d2.total.totalParts).toBe(r.total.totalParts);
+    expect(r.total.stops).toBe(1);
+    expect(r.dayStart).toEqual({ time: '00:00', offset: null });
+    expect(r.findings).toEqual([]);
+  });
+
+  it('--day-start moves the cut; without --by-day there are no days', () => {
+    const r = analyze(s, c, { idealCycleS: 30, byDay: true, dayStart: '7:00' });
+    expect(r.days?.map((d) => [d.day, d.from, d.to])).toEqual([
+      ['2026-01-01', '2026-01-01 22:00:00', '2026-01-02 07:00:00'],
+      ['2026-01-02', '2026-01-02 07:00:00', '2026-01-02 08:00:00'],
+    ]);
+    expect(r.dayStart).toEqual({ time: '07:00', offset: null });
+    expect(analyze(s, c, { idealCycleS: 30 }).days).toBeUndefined();
+  });
+
+  it('files with offsets: day boundaries use the first row offset unless --day-offset is given', () => {
+    const z = parseStates('timestamp,machine,state\n2026-01-01T22:00:00+08:00,A,RUN\n2026-01-02T02:00:00+08:00,A,DOWN\n2026-01-02T04:00:00+08:00,A,RUN\n');
+    const own = analyze(z, undefined, { byDay: true });
+    expect(own.days?.map((d) => [d.day, d.from, d.to, d.total.runS])).toEqual([
+      ['2026-01-01', '2026-01-01 22:00:00+08:00', '2026-01-02 00:00:00+08:00', 7200],
+      ['2026-01-02', '2026-01-02 00:00:00+08:00', '2026-01-02 04:00:00+08:00', 7200],
+    ]);
+    const utc = analyze(z, undefined, { byDay: true, dayOffset: 'Z' });
+    expect(utc.days?.map((d) => [d.day, d.from, d.to])).toEqual([['2026-01-01', '2026-01-01 14:00:00+00:00', '2026-01-01 20:00:00+00:00']]);
+    expect(utc.dayStart).toEqual({ time: '00:00', offset: 'Z' });
+  });
+
+  it('bad day options are input errors', () => {
+    expect(() => analyze(s, c, { byDay: true, dayStart: '25:00' })).toThrow(/--day-start "25:00"/);
+    expect(() => analyze(s, c, { dayStart: '07:00' })).toThrow(/need --by-day/);
+    expect(() => analyze(s, c, { byDay: true, dayOffset: '+08:00' })).toThrow(/only for files whose timestamps carry a zone offset/);
+    const z = parseStates('timestamp,state\n2026-01-01T00:00:00Z,RUN\n2026-01-02T00:00:00Z,DOWN\n');
+    expect(() => analyze(z, undefined, { byDay: true, dayOffset: '8' })).toThrow(/not a zone offset/);
+    expect(() => analyze(z, undefined, { byDay: true, to: '2028-01-01T00:00:00Z' })).toThrow(/at most 400 days/);
+  });
+});
